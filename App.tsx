@@ -17,6 +17,7 @@ import {
   TouchableOpacity,
   View,
   Platform,
+  Linking,
   useWindowDimensions,
   type ScrollViewInstance,
 } from 'react-native';
@@ -31,14 +32,13 @@ import ReanimatedAnimated, {
   useAnimatedStyle,
   useSharedValue,
   withSpring,
-  type SharedValue,
 } from 'react-native-reanimated';
 import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import * as DocumentPicker from 'expo-document-picker';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
-import Purchases from 'react-native-purchases';
+import Purchases, { type CustomerInfo } from 'react-native-purchases';
 import { isPurchasesError, PURCHASES_ERROR_CODE } from 'react-native-purchases';
 import {
   initializeAnalytics,
@@ -94,6 +94,7 @@ import { registerOccurrenceReconciliationTask } from './src/stats/background';
 import type { Occurrence, StreakFreeze } from './src/stats/types';
 import { OnboardingFlow, type OnboardingSetup } from './src/OnboardingFlow';
 import { chooseHuntTarget, HUNT_ITEMS, matchesHuntObject } from './src/challenges/objects';
+import { GlassNavigationBar } from './src/components/GlassNavigationBar';
 
 type Task = 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats';
 type MathDifficulty = 'Easy' | 'Medium' | 'Hard';
@@ -540,23 +541,14 @@ function AlarmSwipeAction({
   alarm,
   action,
   width,
-  translateX,
   onPress,
 }: {
   alarm: Alarm;
   action: 'edit' | 'delete';
   width: number;
-  translateX: SharedValue<number>;
   onPress: () => void;
 }) {
   const isEdit = action === 'edit';
-  const actionStyle = useAnimatedStyle(() => {
-    const progress = isEdit ? translateX.value / width : -translateX.value / width;
-    return {
-      opacity: interpolate(progress, [0, 1], [0, 1], Extrapolation.CLAMP),
-      transform: [{ scale: interpolate(progress, [0, 1], [0.9, 1], Extrapolation.CLAMP) }],
-    };
-  }, [isEdit, width]);
 
   return (
     <ReanimatedAnimated.View
@@ -564,7 +556,6 @@ function AlarmSwipeAction({
         styles.alarmSwipeAction,
         isEdit ? styles.alarmSwipeEdit : styles.alarmSwipeDelete,
         { width },
-        actionStyle,
       ]}
     >
       <TouchableOpacity
@@ -675,7 +666,6 @@ function AlarmSwipeRow({
           alarm={alarm}
           action="edit"
           width={actionWidth}
-          translateX={translateX}
           onPress={onEdit}
         />
       </ReanimatedAnimated.View>
@@ -687,7 +677,6 @@ function AlarmSwipeRow({
           alarm={alarm}
           action="delete"
           width={actionWidth}
-          translateX={translateX}
           onPress={onDelete}
         />
       </ReanimatedAnimated.View>
@@ -817,6 +806,8 @@ export default function App() {
     (windowWidth - 48) * 0.76 / 0.53,
   );
   const [screen, setScreen] = useState<Screen>('welcome');
+  const [navIndicatorPosition] = useState(() => new Animated.Value(0));
+  const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null);
   const [startupProgressLoaded, setStartupProgressLoaded] = useState(false);
   const [alarms, setAlarms] = useState(starterAlarms);
   const [alarmsLoaded, setAlarmsLoaded] = useState(false);
@@ -840,7 +831,6 @@ export default function App() {
   const [expandedEditorSection, setExpandedEditorSection] = useState<'sound' | 'task' | null>(null);
   const [paywallReturnScreen, setPaywallReturnScreen] = useState<Screen>('proof');
   const [paywallStage, setPaywallStage] = useState<PaywallStage>('plans');
-  const [onboardingAlarmId, setOnboardingAlarmId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Alarm>({
     id: '',
     time: '07:00',
@@ -879,6 +869,7 @@ export default function App() {
   const [hasPremium, setHasPremium] = useState(false);
   const [plan, setPlan] = useState<'yearly' | 'monthly' | 'weekly'>('yearly');
   const [plansModalVisible, setPlansModalVisible] = useState(false);
+  const [currentPlanModalVisible, setCurrentPlanModalVisible] = useState(false);
   const [lastAlarm, setLastAlarm] = useState<Alarm>(starterAlarms[0]);
   const snoozeLevel = snoozeLevels[lastAlarm.id] ?? 0;
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -1081,13 +1072,9 @@ export default function App() {
       .then(async (progress) => {
         if (!active) return;
         if (progress?.onboardingComplete) {
-          if (progress.appUnlocked) {
-            setScreen('home');
-          } else {
-            setPaywallReturnScreen('home');
-            setPaywallStage('plans');
-            setScreen('paywall');
-          }
+          setPaywallReturnScreen('home');
+          setPaywallStage('plans');
+          setScreen('paywall');
           return;
         }
 
@@ -1096,9 +1083,11 @@ export default function App() {
           const completedOnboardingAlarm = savedAlarms?.some((alarm) => alarm.id.startsWith('onboarding-')) ?? false;
           if (!active || !completedOnboardingAlarm) return;
 
-          const migratedProgress = { onboardingComplete: true, appUnlocked: true };
+          const migratedProgress = { onboardingComplete: true, appUnlocked: false };
           await persistAppProgress(migratedProgress);
-          setScreen('home');
+          setPaywallReturnScreen('home');
+          setPaywallStage('plans');
+          setScreen('paywall');
         }
       })
       .catch((error: unknown) => {
@@ -1174,7 +1163,8 @@ export default function App() {
       .then(([offerings, customerInfo]) => {
         if (!active) return;
         setAvailablePackages(offerings.current?.availablePackages ?? []);
-        const isPremium = Boolean(customerInfo.entitlements.active.savage_plus);
+        setCustomerInfo(customerInfo);
+        const isPremium = Boolean(customerInfo.entitlements.active.wayykup_premium);
         setHasPremium(isPremium);
         if (isPremium) {
           void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
@@ -1825,15 +1815,7 @@ export default function App() {
     setBillingBusy(true);
     try {
       if (!REVENUECAT_API_KEY) {
-        if (__DEV__ && !failureStage) {
-          setHasPremium(true);
-          void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
-            console.error('Development app access could not be saved.', error);
-          });
-          setScreen('home');
-          return;
-        }
-        setBillingError('Subscriptions are not configured for this build. Please contact support.');
+        setBillingError('Subscriptions are not configured for this build. Add the RevenueCat public SDK key to enable purchases.');
         if (failureStage) setPaywallStage(failureStage);
         return;
       }
@@ -1860,11 +1842,12 @@ export default function App() {
       }
 
       const result = await Purchases.purchasePackage(selectedPackage);
-      if (!result.customerInfo.entitlements.active.savage_plus) {
-        setBillingError('Purchase completed, but the Savage Plus entitlement was not returned.');
+      if (!result.customerInfo.entitlements.active.wayykup_premium) {
+        setBillingError('Purchase completed, but the Wayykup Premium entitlement was not returned.');
         if (failureStage) setPaywallStage(failureStage);
         return;
       }
+      setCustomerInfo(result.customerInfo);
       setHasPremium(true);
       void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
         console.error('Purchased app access could not be saved.', error);
@@ -1890,20 +1873,30 @@ export default function App() {
     }
     try {
       const customerInfo = await Purchases.restorePurchases();
-      if (customerInfo.entitlements.active.savage_plus) {
+      setCustomerInfo(customerInfo);
+      if (customerInfo.entitlements.active.wayykup_premium) {
         setHasPremium(true);
         void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
           console.error('Restored app access could not be saved.', error);
           Alert.alert('Progress could not be saved', 'Your purchase is active, but Wayykup may not remember your app access next time.');
         });
         trackEvent('subscription_restored');
-        setScreen('home');
+        if (screen === 'paywall') setScreen('home');
       } else {
-        setBillingError('No active Savage Plus subscription was found.');
+        setBillingError('No active Wayykup Premium subscription was found.');
       }
     } catch (error) {
       console.error('Purchase restoration failed.', error);
       setBillingError(error instanceof Error ? error.message : 'Purchases could not be restored.');
+    }
+  };
+
+  const closeCurrentPlan = () => {
+    setCurrentPlanModalVisible(false);
+    if (!hasPremium) {
+      setPaywallReturnScreen('home');
+      setPaywallStage('plans');
+      setScreen('paywall');
     }
   };
 
@@ -1953,7 +1946,6 @@ export default function App() {
       shakeCount: alarm.shakeCount ?? 100,
     };
     setDraft(newAlarm);
-    setOnboardingAlarmId(newAlarm.id);
     setAlarms((current) => [
       ...current.filter((item) => !['alpha', 'bravo', 'charlie'].includes(item.id)),
       newAlarm,
@@ -1974,21 +1966,36 @@ export default function App() {
     setScreen(hasPremium ? 'home' : 'paywall');
   };
 
-  const continueWithoutPremium = () => {
-    if (onboardingAlarmId && !hasPremium && (draft.task === 'Shake' || draft.task === 'QR scan')) {
-      setAlarms((current) => current.map((alarm) => alarm.id === onboardingAlarmId
-        ? { ...alarm, task: 'Math', qrCode: undefined }
-        : alarm));
-      setDraft((current) => current.id === onboardingAlarmId
-        ? { ...current, task: 'Math', qrCode: undefined }
-        : current);
+  const showCurrentPlan = () => {
+    setBillingError('');
+    setCurrentPlanModalVisible(true);
+    if (!REVENUECAT_API_KEY || Platform.OS === 'web') return;
+
+    setBillingBusy(true);
+    Purchases.getCustomerInfo()
+      .then((latestInfo) => {
+        setCustomerInfo(latestInfo);
+        setHasPremium(Boolean(latestInfo.entitlements.active.wayykup_premium));
+      })
+      .catch((error: unknown) => {
+        console.error('Current subscription could not be refreshed.', error);
+        setBillingError('Your current plan could not be refreshed. Check your connection and try again.');
+      })
+      .finally(() => setBillingBusy(false));
+  };
+
+  const openSubscriptionManagement = async () => {
+    const managementUrl = customerInfo?.managementURL;
+    if (!managementUrl) {
+      setBillingError('Subscription management is unavailable from the store right now.');
+      return;
     }
-    trackEvent('paywall_continued_without_purchase');
-    void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
-      console.error('App access could not be saved.', error);
-      Alert.alert('Progress could not be saved', 'Wayykup may not remember your app access the next time it opens.');
-    });
-    setScreen('home');
+    try {
+      await Linking.openURL(managementUrl);
+    } catch (error) {
+      console.error('Subscription management could not be opened.', error);
+      setBillingError('The store subscription page could not be opened.');
+    }
   };
 
   const renderWelcome = () => (
@@ -2314,13 +2321,6 @@ export default function App() {
                   }
                 }}
               />
-              <TouchableOpacity
-                accessibilityRole="button"
-                onPress={continueWithoutPremium}
-                style={styles.giftOfferContinue}
-              >
-                <Text style={styles.giftOfferContinueText}>Continue</Text>
-              </TouchableOpacity>
               <View style={styles.trialCancelRow}>
                 <Text style={styles.trialCheck}>✓</Text>
                 <Text style={styles.trialCancelText}>No commitment, cancel anytime</Text>
@@ -2354,7 +2354,7 @@ export default function App() {
                     : isGift
                       ? discountPackage
                         ? 'A special annual package is available through your store.'
-                        : 'No additional discount package is configured right now. You can continue with basic alarms, or review the available plans.'
+                        : 'No additional discount package is configured right now. Review the available subscription plans below.'
                       : 'The store will show the localized price and billing period before you confirm.'}
             </Text>
           </View>
@@ -2381,9 +2381,7 @@ export default function App() {
             {isReminder && <ActionButton label="CONTINUE" onPress={() => setPaywallStage('timeline')} />}
             {isTimeline && <ActionButton label={billingBusy ? 'CONNECTING TO APP STORE…' : 'CONTINUE TO STORE'} onPress={() => purchaseSubscription()} disabled={billingBusy || (!annualPackage && !__DEV__)} />}
             {isGift && discountPackage && <ActionButton label="CLAIM MY SPECIAL OFFER" onPress={() => setPaywallStage('discount')} />}
-            {isGift && <ActionButton label={discountPackage ? 'CONTINUE WITH BASIC' : 'CONTINUE'} onPress={continueWithoutPremium} secondary={Boolean(discountPackage)} />}
             {isDiscount && discountPackage && <ActionButton label={billingBusy ? 'CONNECTING TO APP STORE…' : 'CONTINUE'} onPress={() => purchaseSubscription(discountPackage)} disabled={billingBusy} />}
-            {isDiscount && <ActionButton label="CONTINUE WITH BASIC" onPress={continueWithoutPremium} secondary />}
             {(isTimeline || isDiscount) && !!billingError && <Text accessibilityRole="alert" style={styles.billingError}>{billingError}</Text>}
             {isTimeline && (
               <TouchableOpacity
@@ -2407,7 +2405,7 @@ export default function App() {
     <ScrollView contentContainerStyle={styles.paywall} showsVerticalScrollIndicator={false}>
       <View style={styles.paywallTop}>
         <TouchableOpacity onPress={() => setScreen(paywallReturnScreen)}><Text style={styles.backText}>← BACK</Text></TouchableOpacity>
-        <Tag>03 / 03 · SAVAGE PLUS</Tag>
+        <Tag>03 / 03 · WAYYKUP PREMIUM</Tag>
       </View>
       <View style={styles.paywallHero}>
         <View style={styles.paywallSeal}><Text style={styles.sealIcon}>✳</Text><Text style={styles.sealLabel}>EARLY{'\n'}ACCESS</Text></View>
@@ -2443,10 +2441,15 @@ export default function App() {
         </TouchableOpacity>
       </View>
       <ActionButton
-        label={billingBusy ? 'CONNECTING TO APP STORE…' : !REVENUECAT_API_KEY && __DEV__ ? 'CONTINUE IN DEVELOPMENT PREVIEW' : 'CONTINUE TO STORE'}
+        label={billingBusy ? 'CONNECTING TO APP STORE…' : REVENUECAT_API_KEY ? 'CONTINUE TO STORE' : 'SUBSCRIPTIONS UNAVAILABLE'}
         onPress={purchaseSubscription}
-        disabled={billingBusy || (!REVENUECAT_API_KEY && !__DEV__)}
+        disabled={billingBusy || !REVENUECAT_API_KEY}
       />
+      {!REVENUECAT_API_KEY && (
+        <Text accessibilityRole="alert" style={styles.billingError}>
+          Add the RevenueCat public SDK key to enable subscriptions.
+        </Text>
+      )}
       {REVENUECAT_API_KEY && <TouchableOpacity onPress={restorePurchases} style={styles.restorePurchases}><Text style={styles.restoreText}>RESTORE PURCHASES</Text></TouchableOpacity>}
       {!!billingError && <Text accessibilityRole="alert" style={styles.billingError}>{billingError}</Text>}
       <Text style={styles.terms}>Any trial and renewal price are shown in the store checkout before you confirm.</Text>
@@ -2567,17 +2570,14 @@ export default function App() {
             </ScrollView>
           </View>
         </View>
-        <View style={[styles.referenceTabBar, { width: windowWidth < 360 ? '90%' : '82%', minHeight: 60 * layoutScale, padding: 4 * layoutScale }]}>
-          <TouchableOpacity accessibilityRole="button" accessibilityState={{ selected: true }} onPress={() => setScreen('home')} style={[styles.referenceTab, styles.referenceTabActive]}>
-            <Text style={[styles.referenceTabIconActive, { fontSize: 24 * layoutScale }]} >◴</Text><Text style={[styles.referenceTabLabelActive, { fontSize: 11 * layoutScale }]}>Alarms</Text>
-          </TouchableOpacity>
-          <TouchableOpacity accessibilityRole="button" onPress={() => setScreen('stats')} style={styles.referenceTab}>
-            <Text style={[styles.referenceTabIcon, { fontSize: 23 * layoutScale }]}>▥</Text><Text style={[styles.referenceTabLabel, { fontSize: 11 * layoutScale }]}>Stats</Text>
-          </TouchableOpacity>
-          <TouchableOpacity accessibilityRole="button" onPress={() => setScreen('settings')} style={styles.referenceTab}>
-            <Text style={[styles.referenceTabIcon, { fontSize: 23 * layoutScale }]}>⚙</Text><Text style={[styles.referenceTabLabel, { fontSize: 11 * layoutScale }]}>Settings</Text>
-          </TouchableOpacity>
-        </View>
+        <GlassNavigationBar
+          selected="alarms"
+          indicatorPosition={navIndicatorPosition}
+          reduceMotion={reduceMotion}
+          onSelect={(tab) => setScreen(tab === 'alarms' ? 'home' : tab)}
+          scale={layoutScale}
+          style={{ width: windowWidth < 360 ? '90%' : '82%' }}
+        />
         {Platform.OS === 'web' && <View style={styles.referenceHomeIndicator}><View style={styles.referenceHomeIndicatorLine} /></View>}
         <StatusBar barStyle="dark-content" />
         {screen === 'editor' && renderEditor()}
@@ -2994,6 +2994,8 @@ export default function App() {
         onSetAlarm={openNewAlarm}
         onHome={() => setScreen('home')}
         onSettings={() => setScreen('settings')}
+        indicatorPosition={navIndicatorPosition}
+        reduceMotion={reduceMotion}
         onUseFreeze={useStreakFreeze}
       />
     );
@@ -3088,6 +3090,93 @@ export default function App() {
     } else {
       openBatteryGuidance();
     }
+  };
+
+  const renderCurrentPlanModal = () => {
+    const activeEntitlement = customerInfo?.entitlements.active.wayykup_premium;
+    const activePackage = activeEntitlement
+      ? availablePackages.find((item) => item.product.identifier === activeEntitlement.productIdentifier
+        || item.product.identifier === activeEntitlement.productIdentifier.split(':')[0])
+      : undefined;
+    const expirationDate = activeEntitlement?.expirationDate
+      ? new Date(activeEntitlement.expirationDate).toLocaleDateString(undefined, {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })
+      : null;
+    const planStatus = activeEntitlement
+      ? activeEntitlement.periodType === 'TRIAL'
+        ? expirationDate ? `Free trial ends ${expirationDate}.` : 'Your free trial is active.'
+        : activeEntitlement.willRenew
+          ? expirationDate ? `Renews on ${expirationDate}.` : 'Your subscription renews automatically.'
+          : expirationDate ? `Access continues until ${expirationDate}.` : 'Your subscription is active.'
+      : 'No active Wayykup Pro subscription was found.';
+    const planTitle = activeEntitlement
+      ? activePackage?.product.title ?? 'Wayykup Pro'
+      : 'No active plan';
+
+    return (
+      <Modal
+        visible={currentPlanModalVisible}
+        transparent
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={closeCurrentPlan}
+      >
+        <View style={styles.plansModalRoot}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Close current plan"
+            activeOpacity={1}
+            onPress={closeCurrentPlan}
+            style={styles.plansModalBackdrop}
+          />
+          <View style={[styles.currentPlanSheet, { paddingBottom: Math.max(insets.bottom, 24) }]}>
+            <View style={styles.plansSheetHandle} />
+            <Text style={styles.currentPlanEyebrow}>YOUR WAYYKUP PLAN</Text>
+            <Text style={styles.currentPlanTitle}>{billingBusy && !customerInfo ? 'Checking your plan…' : planTitle}</Text>
+            {activeEntitlement && activePackage && (
+              <Text style={styles.currentPlanPrice}>
+                {activePackage.product.priceString}
+                {activePackage.packageType === Purchases.PACKAGE_TYPE.ANNUAL ? ' / year' : ''}
+                {activePackage.packageType === Purchases.PACKAGE_TYPE.MONTHLY ? ' / month' : ''}
+                {activePackage.packageType === Purchases.PACKAGE_TYPE.WEEKLY ? ' / week' : ''}
+              </Text>
+            )}
+            <Text style={styles.currentPlanStatus}>{planStatus}</Text>
+            {billingBusy && <Text style={styles.currentPlanStatus}>Refreshing subscription details…</Text>}
+            {!!billingError && <Text accessibilityRole="alert" style={styles.plansError}>{billingError}</Text>}
+            {activeEntitlement && customerInfo?.managementURL && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                onPress={() => { void openSubscriptionManagement(); }}
+                style={styles.currentPlanAction}
+              >
+                <Text style={styles.currentPlanActionText}>MANAGE SUBSCRIPTION</Text>
+              </TouchableOpacity>
+            )}
+            {!activeEntitlement && REVENUECAT_API_KEY && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                disabled={billingBusy}
+                onPress={() => { void restorePurchases(); }}
+                style={styles.currentPlanAction}
+              >
+                <Text style={styles.currentPlanActionText}>RESTORE PURCHASES</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              accessibilityRole="button"
+              onPress={closeCurrentPlan}
+              style={styles.currentPlanClose}
+            >
+              <Text style={styles.currentPlanCloseText}>DONE</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    );
   };
 
   const renderSettings = () => (
@@ -3205,12 +3294,16 @@ export default function App() {
           <View style={styles.settingsListRow}>
             <View style={styles.settingsListIcon}><Text style={styles.settingsListIconText}>✳</Text></View>
             <View style={styles.settingsListCopy}>
-              <Text style={styles.settingsListLabel}>Wayykup Pro · {plan === 'yearly' ? 'Yearly' : plan === 'monthly' ? 'Monthly' : 'Weekly'}</Text>
-              <Text style={styles.settingsListDetail}>{hasPremium ? 'Subscription managed by RevenueCat.' : 'Unlock the complete Wayykup experience.'}</Text>
+              <Text style={styles.settingsListLabel}>Wayykup Pro</Text>
+              <Text style={styles.settingsListDetail}>
+                {hasPremium
+                  ? 'View your active subscription and renewal status.'
+                  : 'An active subscription is required to unlock Wayykup.'}
+              </Text>
             </View>
           </View>
-          <TouchableOpacity onPress={() => { setPaywallReturnScreen('settings'); setPlan('yearly'); setPaywallStage('plans'); setScreen('paywall'); }} style={styles.settingsManagePlan}>
-            <Text style={styles.settingsManagePlanText}>{hasPremium ? 'MANAGE SUBSCRIPTION' : 'VIEW PLANS'}  ›</Text>
+          <TouchableOpacity accessibilityRole="button" onPress={showCurrentPlan} style={styles.settingsManagePlan}>
+            <Text style={styles.settingsManagePlanText}>{hasPremium ? 'VIEW CURRENT PLAN' : 'VIEW PLAN STATUS'}  ›</Text>
           </TouchableOpacity>
         </View>
 
@@ -3251,19 +3344,15 @@ export default function App() {
           </View>
         </View>
       </ScrollView>
-      <View style={styles.referenceTabBar}>
-        <TouchableOpacity accessibilityRole="button" onPress={() => setScreen('home')} style={styles.referenceTab}>
-          <Text style={styles.referenceTabIcon}>◴</Text><Text style={styles.referenceTabLabel}>Alarms</Text>
-        </TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" onPress={() => setScreen('stats')} style={styles.referenceTab}>
-          <Text style={styles.referenceTabIcon}>▥</Text><Text style={styles.referenceTabLabel}>Stats</Text>
-        </TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" accessibilityState={{ selected: true }} onPress={() => setScreen('settings')} style={[styles.referenceTab, styles.referenceTabActive]}>
-          <Text style={styles.referenceTabIconActive}>⚙</Text><Text style={styles.referenceTabLabelActive}>Settings</Text>
-        </TouchableOpacity>
-      </View>
+      <GlassNavigationBar
+        selected="settings"
+        indicatorPosition={navIndicatorPosition}
+        reduceMotion={reduceMotion}
+        onSelect={(tab) => setScreen(tab === 'alarms' ? 'home' : tab)}
+      />
       {Platform.OS === 'web' && <View style={styles.referenceHomeIndicator}><View style={styles.referenceHomeIndicatorLine} /></View>}
       <StatusBar barStyle="dark-content" />
+      {renderCurrentPlanModal()}
     </SafeAreaView>
   );
 
@@ -3470,6 +3559,15 @@ const styles = StyleSheet.create({
   plansModalRoot: { flex: 1, justifyContent: 'flex-end' },
   plansModalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
   plansSheet: { width: '100%', maxWidth: 620, alignSelf: 'center', backgroundColor: '#FFFFFF', borderTopLeftRadius: 25, borderTopRightRadius: 25, paddingHorizontal: 23, paddingTop: 16 },
+  currentPlanSheet: { width: '100%', maxWidth: 620, alignSelf: 'center', backgroundColor: '#FFFFFF', borderTopLeftRadius: 25, borderTopRightRadius: 25, paddingHorizontal: 24, paddingTop: 34 },
+  currentPlanEyebrow: { color: RED, fontSize: 11, fontWeight: '800', letterSpacing: 1.2, textAlign: 'center', marginTop: 10 },
+  currentPlanTitle: { color: INK, fontSize: 26, fontWeight: '800', textAlign: 'center', marginTop: 12 },
+  currentPlanPrice: { color: INK, fontSize: 16, fontWeight: '700', textAlign: 'center', marginTop: 8 },
+  currentPlanStatus: { color: MUTED, fontSize: 14, lineHeight: 20, textAlign: 'center', marginTop: 10 },
+  currentPlanAction: { minHeight: 50, alignItems: 'center', justifyContent: 'center', borderRadius: 25, backgroundColor: INK, marginTop: 22 },
+  currentPlanActionText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: 0.6 },
+  currentPlanClose: { minHeight: 48, alignItems: 'center', justifyContent: 'center', marginTop: 8 },
+  currentPlanCloseText: { color: MUTED, fontSize: 12, fontWeight: '700', letterSpacing: 0.6 },
   plansSheetHandle: { position: 'absolute', top: 8, width: 40, height: 4, borderRadius: 2, backgroundColor: '#E1E1E5', alignSelf: 'center' },
   plansOption: { width: '100%', minHeight: 70, borderRadius: 16, borderWidth: 2, borderColor: '#E8E8EA', backgroundColor: '#FFFFFF', overflow: 'hidden', marginTop: 10 },
   plansOptionSelected: { borderColor: '#F2A21A' },
@@ -3630,8 +3728,8 @@ const styles = StyleSheet.create({
   alarmCardList: { gap: 12 },
   referenceAlarmCard: { backgroundColor: '#FFFFFF', borderRadius: 24, paddingHorizontal: 19, paddingVertical: 0, borderWidth: 1, borderColor: '#F3F3F5', shadowColor: '#707070', shadowOpacity: 0.05, shadowRadius: 18, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
   alarmSwipeContainer: { justifyContent: 'center', overflow: 'hidden', backgroundColor: '#FFFFFF' },
-  alarmSwipeActionReveal: { position: 'absolute', top: 0, bottom: 0 },
-  alarmSwipeAction: { alignItems: 'center', justifyContent: 'center' },
+  alarmSwipeActionReveal: { position: 'absolute', top: 0, bottom: 0, alignItems: 'stretch', justifyContent: 'center', zIndex: 0 },
+  alarmSwipeAction: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
   alarmSwipeActionButton: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', gap: 2 },
   alarmSwipeEdit: { backgroundColor: INK },
   alarmSwipeDelete: { backgroundColor: RED },
@@ -3654,13 +3752,6 @@ const styles = StyleSheet.create({
   referenceToggleThumbOn: { backgroundColor: '#FFFFFF' },
   referenceEmptyCard: { minHeight: 100, borderRadius: 24, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
   referenceEmptyText: { color: MUTED, fontSize: 14 },
-  referenceTabBar: { width: '82%', maxWidth: 360, minHeight: 60, alignSelf: 'center', marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', padding: 4, borderRadius: 36, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#FFFFFF', shadowColor: '#555555', shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: { width: 0, height: 5 }, elevation: 5 },
-  referenceTab: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', borderRadius: 32, gap: 1 },
-  referenceTabActive: { backgroundColor: '#FFF0F0' },
-  referenceTabIcon: { color: '#77777D', fontSize: 23, lineHeight: 26 },
-  referenceTabLabel: { color: '#77777D', fontSize: 11, fontWeight: '600' },
-  referenceTabIconActive: { color: '#FF1717', fontSize: 24, lineHeight: 26 },
-  referenceTabLabelActive: { color: '#F31616', fontSize: 11, fontWeight: '600' },
   referenceHomeIndicator: { height: 30, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 5 },
   referenceHomeIndicatorLine: { width: 139, height: 5, borderRadius: 3, backgroundColor: '#050505' },
   editor: { paddingHorizontal: 23, paddingTop: 10, paddingBottom: 30 },

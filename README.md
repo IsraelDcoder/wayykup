@@ -23,9 +23,9 @@ npm run start:dev
 
 The app also uses native modules for on-device object recognition, accelerometer input, audio, RevenueCat, and Mixpanel.
 
-Copy `.env.example` to `.env` and add the public SDK keys for the relevant platforms. RevenueCat needs an offering containing `WEEKLY` and `ANNUAL` packages and an active entitlement named `savage_plus`. Configure the annual product's seven-day introductory trial in App Store Connect / Play Console and RevenueCat. The app does not contain store credentials.
+Copy `.env.example` to `.env` and add the public SDK keys for the relevant platforms. RevenueCat needs an offering containing `WEEKLY` and `ANNUAL` packages and an active entitlement named `wayykup_premium`. Configure the annual product's seven-day introductory trial in App Store Connect / Play Console and RevenueCat. The app does not contain store credentials.
 
-The development build offers a clearly labeled preview path when no RevenueCat key is set. Release builds do not bypass the paywall if billing is unconfigured.
+All builds require an active `wayykup_premium` entitlement before opening the app; saved local unlock state or missing billing configuration cannot bypass the paywall. When RevenueCat is not configured in development, the paywall remains visible and explains that a public SDK key is needed to enable purchases. In Settings, **View Current Plan** displays the active RevenueCat plan and renewal/trial status, with a link to the store's subscription-management page when available.
 
 ## Native alarm behavior and limits
 

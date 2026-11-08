@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Svg, { Circle, Path, Text as SvgText } from 'react-native-svg';
+import { GlassNavigationBar, type NavigationTab } from '../components/GlassNavigationBar';
 import {
   calculateStreaks,
   dayResult,
@@ -26,6 +27,8 @@ type Props = {
   onSetAlarm: () => void;
   onHome: () => void;
   onSettings: () => void;
+  indicatorPosition: Animated.Value;
+  reduceMotion: boolean;
   onUseFreeze: (date: string) => Promise<void>;
 };
 
@@ -161,6 +164,8 @@ export function StatsScreen({
   onSetAlarm,
   onHome,
   onSettings,
+  indicatorPosition,
+  reduceMotion,
   onUseFreeze,
 }: Props) {
   const [period, setPeriod] = useState<StatsPeriod>('month');
@@ -183,18 +188,17 @@ export function StatsScreen({
       && now.getTime() - item.scheduledAt <= 24 * 60 * 60 * 1000)
     .sort((a, b) => b.scheduledAt - a.scheduledAt)[0];
   const trendEnabled = completedCount >= 3;
+  const selectTab = (tab: NavigationTab) => {
+    if (tab === 'alarms') onHome();
+    if (tab === 'settings') onSettings();
+  };
   const tabBar = (
-    <View style={styles.tabBar} accessibilityLabel="Main navigation">
-      <TouchableOpacity accessibilityRole="button" onPress={onHome} style={styles.tabButton}>
-        <Text style={styles.tabInactive}>◴</Text><Text style={styles.tabInactive}>Alarms</Text>
-      </TouchableOpacity>
-      <View accessibilityRole="tab" accessibilityState={{ selected: true }} style={[styles.tabButton, styles.tabActiveButton]}>
-        <Text style={styles.tabActive}>▥</Text><Text style={styles.tabActive}>Stats</Text>
-      </View>
-      <TouchableOpacity accessibilityRole="button" onPress={onSettings} style={styles.tabButton}>
-        <Text style={styles.tabInactive}>⚙</Text><Text style={styles.tabInactive}>Settings</Text>
-      </TouchableOpacity>
-    </View>
+    <GlassNavigationBar
+      selected="stats"
+      indicatorPosition={indicatorPosition}
+      reduceMotion={reduceMotion}
+      onSelect={selectTab}
+    />
   );
 
   if (loading) {
@@ -514,9 +518,4 @@ const styles = StyleSheet.create({
   skeleton: { backgroundColor: theme.color.surface, borderRadius: theme.radius.card },
   skeletonRow: { flexDirection: 'row', gap: 10 },
   errorPage: { flex: 1, justifyContent: 'center', padding: theme.spacing.screen, backgroundColor: theme.color.background, gap: 14 },
-  tabBar: { width: '82%', maxWidth: 360, minHeight: 60, alignSelf: 'center', marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', padding: 4, borderRadius: 36, backgroundColor: theme.color.surface, borderWidth: 1, borderColor: theme.color.surface, shadowColor: '#555555', shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: { width: 0, height: 5 }, elevation: 5 },
-  tabButton: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', borderRadius: 32, gap: 1 },
-  tabActiveButton: { backgroundColor: theme.color.accentSurface },
-  tabActive: { color: theme.color.accent, fontFamily: theme.font.strong, fontSize: 12 },
-  tabInactive: { color: theme.color.muted, fontFamily: theme.font.medium, fontSize: 12 },
 });
