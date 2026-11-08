@@ -28,6 +28,7 @@ import {
   type AlarmRecord,
 } from './nativeServices';
 import { HUNT_ITEMS } from './challenges/objects';
+import { WayykupIcon } from './components/WayykupIcon';
 
 const RED = '#F29A00';
 const INK = '#1A131A';
@@ -335,20 +336,7 @@ function SunriseIllustration() {
 }
 
 function AlarmNotificationIcon() {
-  return (
-    <View style={styles.notificationIconTile}>
-      <View style={[styles.notificationIconCorner, styles.notificationIconTopLeft]} />
-      <View style={[styles.notificationIconCorner, styles.notificationIconTopRight]} />
-      <View style={[styles.notificationIconCorner, styles.notificationIconBottomLeft]} />
-      <View style={[styles.notificationIconCorner, styles.notificationIconBottomRight]} />
-      <View style={styles.notificationClock}>
-        <View style={styles.notificationClockHand} />
-        <View style={styles.notificationClockHandLong} />
-      </View>
-      <View style={styles.notificationBellLeft} />
-      <View style={styles.notificationBellRight} />
-    </View>
-  );
+  return <WayykupIcon size={52} />;
 }
 
 function NotificationReveal() {
@@ -847,7 +835,6 @@ export function OnboardingFlow({
   const welcomeLogoEntrance = useRef(new Animated.Value(0)).current;
   const welcomeCopyEntrance = useRef(new Animated.Value(0)).current;
   const welcomeProofEntrance = useRef(new Animated.Value(0)).current;
-  const welcomeHandRotation = useRef(new Animated.Value(0)).current;
   const continueScale = useRef(new Animated.Value(1)).current;
   const progressMotion = useRef(new Animated.Value(0)).current;
   const savingsContinueMotion = useRef(new Animated.Value(0)).current;
@@ -900,7 +887,6 @@ export function OnboardingFlow({
   useEffect(() => {
     if (step !== 'welcome') {
       logoPulse.stopAnimation();
-      welcomeHandRotation.stopAnimation();
       return;
     }
     if (reduceMotion) {
@@ -913,7 +899,6 @@ export function OnboardingFlow({
     welcomeLogoEntrance.setValue(0);
     welcomeCopyEntrance.setValue(0);
     welcomeProofEntrance.setValue(0);
-    welcomeHandRotation.setValue(0);
     const entrance = Animated.stagger(140, [
       Animated.spring(welcomeLogoEntrance, {
         toValue: 1,
@@ -938,26 +923,17 @@ export function OnboardingFlow({
       Animated.timing(logoPulse, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       Animated.timing(logoPulse, { toValue: 0, duration: 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
     ]));
-    const hand = Animated.loop(Animated.timing(welcomeHandRotation, {
-      toValue: 1,
-      duration: 2200,
-      easing: Easing.linear,
-      useNativeDriver: true,
-    }));
     entrance.start();
     pulse.start();
-    hand.start();
     return () => {
       entrance.stop();
       pulse.stop();
-      hand.stop();
     };
   }, [
     logoPulse,
     reduceMotion,
     step,
     welcomeCopyEntrance,
-    welcomeHandRotation,
     welcomeLogoEntrance,
     welcomeProofEntrance,
   ]);
@@ -1512,21 +1488,7 @@ export function OnboardingFlow({
                 ],
               },
             ]}>
-              <View style={[styles.logoCorner, styles.logoCornerTopLeft]} />
-              <View style={[styles.logoCorner, styles.logoCornerTopRight]} />
-              <View style={[styles.logoCorner, styles.logoCornerBottomLeft]} />
-              <View style={[styles.logoCorner, styles.logoCornerBottomRight]} />
-              <View style={styles.alarmFace}>
-                <View style={styles.alarmBellLeft} />
-                <View style={styles.alarmBellRight} />
-                <View style={styles.alarmHandShort} />
-                <Animated.View style={[
-                  styles.alarmHandLong,
-                  { transform: [{ rotate: welcomeHandRotation.interpolate({ inputRange: [0, 1], outputRange: ['-48deg', '312deg'] }) }] },
-                ]} />
-                <View style={styles.alarmFootLeft} />
-                <View style={styles.alarmFootRight} />
-              </View>
+              <WayykupIcon size={compactLayout ? 84 : 112} />
             </Animated.View>
             <Animated.View style={[
               styles.welcomeCopyEntrance,
@@ -1535,7 +1497,10 @@ export function OnboardingFlow({
                 transform: [{ translateY: welcomeCopyEntrance.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }],
               },
             ]}>
-              <Text style={[styles.welcomeBrand, compactLayout && styles.welcomeBrandCompact]}>Wayykup</Text>
+              <View style={styles.welcomeBrandLockup}>
+                <WayykupIcon size={compactLayout ? 34 : 42} />
+                <Text style={[styles.welcomeBrand, compactLayout && styles.welcomeBrandCompact]}>Wayykup</Text>
+              </View>
               <Text style={[styles.welcomeSubtitle, compactLayout && styles.welcomeSubtitleCompact]}>The alarm that actually gets you out of bed.</Text>
             </Animated.View>
             <Animated.View style={[
@@ -1643,7 +1608,10 @@ export function OnboardingFlow({
       case 'setup':
         return (
           <View style={styles.setupArt}>
-            <Text style={styles.setupProgress}>Wayykup Alarm</Text>
+            <View style={styles.setupBrand}>
+              <WayykupIcon size={20} />
+              <Text style={styles.setupProgress}>Wayykup Alarm</Text>
+            </View>
             <SunriseIllustration />
             <Text style={styles.setupHeading}>Time to build your{'\n'}first alarm</Text>
             <Text style={styles.setupSub}>It will only take 30 seconds.</Text>
@@ -2275,18 +2243,7 @@ const styles = StyleSheet.create({
   welcomeProofEntrance: { width: '100%', alignItems: 'center' },
   logoTile: { width: 138, height: 138, borderRadius: 29, backgroundColor: '#F2F1F6', alignItems: 'center', justifyContent: 'center', shadowColor: '#87838D', shadowOpacity: 0.16, shadowRadius: 22, shadowOffset: { width: 0, height: 9 }, position: 'relative', marginTop: 3 },
   logoTileCompact: { width: 108, height: 108, borderRadius: 25 },
-  logoCorner: { position: 'absolute', width: 22, height: 22, borderColor: INK },
-  logoCornerTopLeft: { left: 16, top: 15, borderLeftWidth: 4, borderTopWidth: 4, borderTopLeftRadius: 3 },
-  logoCornerTopRight: { right: 16, top: 15, borderRightWidth: 4, borderTopWidth: 4, borderTopRightRadius: 3 },
-  logoCornerBottomLeft: { left: 16, bottom: 15, borderLeftWidth: 4, borderBottomWidth: 4, borderBottomLeftRadius: 3 },
-  logoCornerBottomRight: { right: 16, bottom: 15, borderRightWidth: 4, borderBottomWidth: 4, borderBottomRightRadius: 3 },
-  alarmFace: { width: 68, height: 68, borderWidth: 4, borderColor: INK, borderRadius: 36, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
-  alarmBellLeft: { position: 'absolute', width: 20, height: 10, borderRadius: 10, backgroundColor: INK, left: -1, top: -9, transform: [{ rotate: '-28deg' }] },
-  alarmBellRight: { position: 'absolute', width: 20, height: 10, borderRadius: 10, backgroundColor: INK, right: -1, top: -9, transform: [{ rotate: '28deg' }] },
-  alarmHandShort: { position: 'absolute', width: 4, height: 26, borderRadius: 2, backgroundColor: INK, top: 11, transform: [{ rotate: '45deg' }] },
-  alarmHandLong: { position: 'absolute', width: 4, height: 25, borderRadius: 2, backgroundColor: INK, top: 12, transform: [{ rotate: '-48deg' }] },
-  alarmFootLeft: { position: 'absolute', width: 5, height: 13, borderRadius: 3, backgroundColor: INK, bottom: -10, left: 11, transform: [{ rotate: '35deg' }] },
-  alarmFootRight: { position: 'absolute', width: 5, height: 13, borderRadius: 3, backgroundColor: INK, bottom: -10, right: 11, transform: [{ rotate: '-35deg' }] },
+  welcomeBrandLockup: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   welcomeBrand: { color: INK, fontSize: 45, lineHeight: 52, fontWeight: '700', fontFamily: 'Georgia', letterSpacing: -1.5, marginTop: 0 },
   welcomeBrandCompact: { fontSize: 38, lineHeight: 44 },
   welcomeSubtitle: { color: MUTED, fontSize: 15, fontWeight: '600', textAlign: 'center', lineHeight: 21, paddingHorizontal: 22, marginTop: -4 },
@@ -2377,7 +2334,8 @@ const styles = StyleSheet.create({
   reframeHeading: { color: '#17131B', fontFamily: 'Georgia', fontSize: 38, fontWeight: '700', lineHeight: 48, textAlign: 'center', letterSpacing: -0.5 },
   reframeText: { color: '#66616A', fontSize: 16, lineHeight: 26, fontWeight: '400', textAlign: 'center', paddingHorizontal: 0 },
   setupArt: { flex: 1, alignItems: 'center', justifyContent: 'space-between', minHeight: 510, paddingBottom: 8 },
-  setupProgress: { color: '#9A969D', fontFamily: 'Georgia', fontSize: 14, fontWeight: '700', marginTop: 4 },
+  setupBrand: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 4 },
+  setupProgress: { color: '#9A969D', fontFamily: 'Georgia', fontSize: 14, fontWeight: '700' },
   setupHeading: { color: '#17131B', fontFamily: 'Georgia', fontSize: 38, fontWeight: '700', lineHeight: 48, letterSpacing: -0.5, textAlign: 'center' },
   setupSub: { color: '#96929A', fontSize: 16, lineHeight: 24, textAlign: 'center', marginTop: -7 },
   timePicker: { height: 230, borderRadius: 20, backgroundColor: '#F3F2F6', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', marginTop: 35 },
@@ -2423,17 +2381,6 @@ const styles = StyleSheet.create({
   mockNotificationBack: { position: 'absolute', bottom: 0, width: '88%', height: 83, flexDirection: 'row', alignItems: 'center', backgroundColor: '#E8E8E8', borderRadius: 24, paddingHorizontal: 15, paddingTop: 16 },
   notificationBackText: { color: '#19171A', fontSize: 16, fontWeight: '500', marginLeft: 13 },
   mockNotificationFront: { position: 'absolute', top: 0, width: '100%', minHeight: 104, flexDirection: 'row', alignItems: 'center', backgroundColor: '#E8E8E8', borderRadius: 24, paddingHorizontal: 16, paddingVertical: 14, zIndex: 2, shadowColor: '#6E6B70', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 3 },
-  notificationIconTile: { width: 58, height: 58, flexShrink: 0, borderRadius: 18, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', position: 'relative' },
-  notificationIconCorner: { position: 'absolute', width: 10, height: 10, borderColor: '#17131B', borderWidth: 1.8 },
-  notificationIconTopLeft: { left: 9, top: 9, borderRightWidth: 0, borderBottomWidth: 0 },
-  notificationIconTopRight: { right: 9, top: 9, borderLeftWidth: 0, borderBottomWidth: 0 },
-  notificationIconBottomLeft: { left: 9, bottom: 9, borderRightWidth: 0, borderTopWidth: 0 },
-  notificationIconBottomRight: { right: 9, bottom: 9, borderLeftWidth: 0, borderTopWidth: 0 },
-  notificationClock: { width: 24, height: 24, borderRadius: 13, borderWidth: 2, borderColor: '#17131B', alignItems: 'center', justifyContent: 'center', marginTop: 3 },
-  notificationClockHand: { position: 'absolute', width: 2, height: 8, backgroundColor: '#17131B', top: 3 },
-  notificationClockHandLong: { position: 'absolute', height: 2, width: 8, backgroundColor: '#17131B', right: 3, top: 10, transform: [{ rotate: '-30deg' }] },
-  notificationBellLeft: { position: 'absolute', width: 8, height: 4, borderRadius: 5, backgroundColor: '#17131B', top: 12, left: 17, transform: [{ rotate: '-35deg' }] },
-  notificationBellRight: { position: 'absolute', width: 8, height: 4, borderRadius: 5, backgroundColor: '#17131B', top: 12, right: 17, transform: [{ rotate: '35deg' }] },
   notificationCopy: { flex: 1, marginLeft: 14 },
   notificationHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 },
   notificationApp: { color: '#17131B', fontSize: 13, fontWeight: '800', letterSpacing: 0.1 },

@@ -69,6 +69,7 @@ import {
 } from './modules/wayykup-alarm';
 import { StatsScreen } from './src/stats/StatsScreen';
 import { StreakMoment } from './src/stats/StreakMoment';
+import { WayykupIcon } from './src/components/WayykupIcon';
 import {
   calculateStreaks,
   countsTowardStreak,
@@ -2001,7 +2002,10 @@ export default function App() {
   const renderWelcome = () => (
     <View style={styles.onboarding}>
       <View style={styles.onboardingTop}>
-        <Text style={styles.wordmark}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text>
+        <View style={styles.wordmarkLockup}>
+          <WayykupIcon size={26} />
+          <Text style={styles.wordmark}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text>
+        </View>
         <Tag>WAKE UP / 001</Tag>
       </View>
       <View style={styles.heroGraphic}>
@@ -2339,7 +2343,10 @@ export default function App() {
 
       return (
         <ScrollView contentContainerStyle={styles.waterfall} showsVerticalScrollIndicator={false}>
-          <Text style={styles.wordmarkSmall}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text>
+          <View style={styles.wordmarkLockup}>
+            <WayykupIcon size={26} />
+            <Text style={styles.wordmarkSmall}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text>
+          </View>
           <View style={styles.waterfallHero}>
             <Text style={styles.waterfallIcon}>{isIntro ? '◴' : isTimeline ? '✦' : isGift ? '🎁' : '✦'}</Text>
             <Text style={styles.eyebrow}>{isGift ? 'A THANK-YOU OFFER' : 'YOUR MORNING, REBUILT'}</Text>
@@ -2940,7 +2947,7 @@ export default function App() {
           <TouchableOpacity accessibilityRole="button" onPress={emergencyBypass} style={styles.emergencyBypass}>
             <Text style={styles.emergencyBypassText}>EMERGENCY BYPASS</Text>
           </TouchableOpacity>
-          <View style={styles.alarmScreenFoot}><Text style={styles.alarmFootMark}>S.</Text><Text style={styles.alarmFootText}>NO EXIT UNTIL IT’S DONE.</Text></View>
+          <View style={styles.alarmScreenFoot}><WayykupIcon size={18} style={styles.alarmFootMark} /><Text style={styles.alarmFootText}>NO EXIT UNTIL IT’S DONE.</Text></View>
         </ScrollView>
         <Modal
           visible={challengeShuffleVisible}
@@ -3338,7 +3345,7 @@ export default function App() {
           </TouchableOpacity>
           <View style={styles.settingsListDivider} />
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsListIcon}><Text style={styles.settingsListIconText}>W.</Text></View>
+            <View style={styles.settingsListIcon}><WayykupIcon size={26} /></View>
             <Text style={styles.settingsListLabel}>Wayykup</Text>
             <Text style={styles.settingsListStatus}>Version 1.0.0</Text>
           </View>
@@ -3449,7 +3456,7 @@ export default function App() {
   };
 
   const screenContent = !startupProgressLoaded
-    ? <View style={styles.startupLoading}><Text style={styles.wordmark}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text></View>
+    ? <View style={styles.startupLoading}><WayykupIcon size={88} /></View>
     : screen === 'welcome'
     ? <OnboardingFlow onComplete={completeOnboarding} trackEvent={trackEvent} reduceMotion={reduceMotion} />
     : screen === 'proof'
@@ -3480,6 +3487,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: PAPER },
   onboarding: { flex: 1, backgroundColor: PAPER, paddingHorizontal: 26, paddingTop: 16, paddingBottom: 18, justifyContent: 'space-between' },
   onboardingTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  wordmarkLockup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   wordmark: { color: INK, fontSize: 17, fontWeight: '900', letterSpacing: 2 },
   wordmarkSmall: { color: INK, fontSize: 16, fontWeight: '900', letterSpacing: 1.7 },
   wordmarkDot: { color: RED },
@@ -3933,7 +3941,7 @@ const styles = StyleSheet.create({
   emergencyBypass: { alignSelf: 'center', minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 },
   emergencyBypassText: { color: '#FFDAD4', fontSize: 10, fontWeight: '800', letterSpacing: 1.1, textDecorationLine: 'underline' },
   alarmScreenFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 'auto', paddingTop: 17 },
-  alarmFootMark: { color: '#FFFFFF', fontSize: 14, fontWeight: '900', marginRight: 7 },
+  alarmFootMark: { marginRight: 7 },
   alarmFootText: { color: '#FFDAD4', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 },
   statsOverview: { flex: 1, paddingHorizontal: 24, paddingTop: 46 },
   statsPageTitle: { color: INK, fontSize: 32, lineHeight: 39, fontWeight: '800', letterSpacing: -0.8 },

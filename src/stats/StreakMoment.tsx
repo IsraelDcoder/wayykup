@@ -23,6 +23,7 @@ import {
 } from '@expo-google-fonts/space-grotesk';
 import { STREAK_MILESTONES } from './constants';
 import { formatDuration } from './logic';
+import { WayykupIcon } from '../components/WayykupIcon';
 import { statsTheme as theme } from './theme';
 
 type Props = {
@@ -141,7 +142,10 @@ export function StreakMoment({
             <View style={[styles.progressFill, { width: `${Math.min(100, Math.max(4, progress * 100))}%` }]} />
           </View>
         </View>
-        <Text style={styles.brand}>WAYYKUP</Text>
+        <View style={styles.brandLockup}>
+          <WayykupIcon size={22} />
+          <Text style={styles.brand}>WAYYKUP</Text>
+        </View>
       </View>
 
       <View style={styles.ratingSection} accessibilityLabel="Optional morning rating">
@@ -191,7 +195,8 @@ const styles = StyleSheet.create({
   progressText: { color: theme.color.muted, fontFamily: theme.font.medium, fontSize: 12 },
   progressTrack: { height: 8, overflow: 'hidden', borderRadius: 6, backgroundColor: theme.color.surface2 },
   progressFill: { height: '100%', borderRadius: 6, backgroundColor: theme.color.accent },
-  brand: { color: theme.color.muted, fontFamily: theme.font.strong, fontSize: 11, letterSpacing: 2, marginTop: 26 },
+  brandLockup: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 26 },
+  brand: { color: theme.color.muted, fontFamily: theme.font.strong, fontSize: 11, letterSpacing: 2 },
   ratingSection: { alignItems: 'center', gap: 10 },
   ratingTitle: { color: theme.color.muted, fontFamily: theme.font.medium, fontSize: 13 },
   ratingRow: { flexDirection: 'row', gap: 10 },
