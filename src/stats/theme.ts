@@ -1,0 +1,35 @@
+export const statsTheme = {
+  color: {
+    background: '#F7F7F9',
+    surface: '#FFFFFF',
+    surface2: '#F1F1F3',
+    divider: '#EFEDEF',
+    text: '#171717',
+    muted: '#77736F',
+    accent: '#FF1717',
+    accentSurface: '#FFF0F0',
+    highlight: '#F5A20B',
+    highlightText: '#8A4B00',
+    bypass: '#77777D',
+    hero: '#171717',
+    heroText: '#FFFFFF',
+    heroMuted: '#D5D1CE',
+    heroSurface: '#363330',
+    white: '#FFFFFF',
+  },
+  radius: {
+    card: 24,
+    cell: 8,
+  },
+  spacing: {
+    screen: 20,
+    gap: 16,
+  },
+  font: {
+    heading: 'SpaceGrotesk_700Bold',
+    number: 'SpaceGrotesk_600SemiBold',
+    body: 'Inter_400Regular',
+    medium: 'Inter_500Medium',
+    strong: 'Inter_600SemiBold',
+  },
+} as const;
