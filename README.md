@@ -9,6 +9,10 @@ npm install
 npm run android
 ```
 
+## Marketing website
+
+The standalone Wayykup landing page is in [`website/index.html`](./website/index.html). Open it directly for a preview, or serve the repository root with `website/` as the page path; its app icon and legal links resolve from the repository assets and policy pages.
+
 Wayykup's alarm layer is a local Expo module. **Expo Go is not supported for alarm testing.** Use an EAS development build or a locally generated native project. Android builds need Android Studio/SDK; iOS builds require macOS and Xcode.
 
 ```sh
