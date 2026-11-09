@@ -153,7 +153,7 @@
           <li><strong>Alarm and challenge settings:</strong> alarm times, repeat days, sounds, challenge types and settings, selected Object Hunt targets, and (if you use that challenge) the contents of a linked QR code.</li>
           <li><strong>Wake-up history:</strong> alarm schedule and time-zone information, ring and completion times, challenge type, attempts, snoozes or bypasses, challenge results, and optional morning ratings. Some of this information is recorded in a local database on your device.</li>
           <li><strong>Onboarding responses:</strong> answers you choose to provide, which may include age range or age, gender, wake and bedtime habits, reasons for waking, alarm habits, and how you heard about Wayykup. An unfinished onboarding draft is saved locally so you can resume it.</li>
-          <li><strong>Device permissions and capabilities:</strong> camera access for Object Hunt or QR challenges, notifications and alarm permissions, motion sensor readings for movement challenges, and audio access for alarm playback or sounds you select.</li>
+          <li><strong>Device permissions and capabilities:</strong> camera access for Object Hunt, QR, or Face challenges; microphone access for Yell to Wake; notifications and alarm permissions; motion sensor readings for movement challenges; and audio access for alarm playback or sounds you select.</li>
           <li><strong>Device and app information:</strong> the app may use the device model, operating system, app version, and technical diagnostic information needed to check alarm compatibility or operate third-party SDKs.</li>
           <li><strong>Subscription information:</strong> if subscriptions are enabled, RevenueCat and Apple or Google process purchase and subscription status, product and entitlement information, and related transaction or diagnostic data. Wayykup does not receive or store your full payment-card details.</li>
         </ul>
@@ -162,29 +162,36 @@
       <section>
         <h2>2. Camera, photos, and QR challenges</h2>
         <p>Camera access is optional and is used only when you choose a camera-based challenge. For Object Hunt, the app takes a photo when you request recognition and analyzes its image labels on-device. Wayykup does not send that photo to a Wayykup server for recognition. For a QR challenge, the camera reads the code and its contents are saved with the alarm on your device so the app can compare a later scan.</p>
+        <p>For Face Challenge, the front camera provides temporary frames to an on-device face-gesture detector while the challenge is active. The app checks gestures such as smiling, blinking, and turning your head. Frames and face measurements are processed in memory, are not saved or uploaded, and are not used for face recognition, identification, or identity templates. The camera session is released when the challenge ends or switches to its fallback.</p>
         <p>You can deny or revoke camera permission in your device settings. Camera-based challenges will not work without permission. Any temporary camera image handling or caching may also be subject to your operating system and device behavior.</p>
       </section>
 
       <section>
-        <h2>3. Where information is stored</h2>
+        <h2>3. Microphone and Yell to Wake</h2>
+        <p>If you select Yell to Wake, Wayykup requests microphone access during setup and checks it again when the challenge starts. The app reads short-lived microphone samples in memory to calculate a sound-level meter; it does not create an audio recording or save, upload, or log raw audio. Only the challenge result and non-identifying challenge metrics may be included in optional analytics. Revoking permission or losing microphone access switches the alarm to its selected fallback challenge.</p>
+        <p>Microphone access is not used in the background. Yell to Wake uses it only while its challenge screen is active. Disconnecting Bluetooth or wired headsets may improve microphone routing on some devices.</p>
+      </section>
+
+      <section>
+        <h2>4. Where information is stored</h2>
         <p>Alarm settings, onboarding drafts, app preferences, linked challenge data, and wake-up history are stored in app-private storage on your device. Custom alarm sounds you select are copied into app-private storage for playback. This information is not backed up to a Wayykup account because the app does not currently provide account-based cloud sync.</p>
         <p>Uninstalling the app or clearing its storage will generally remove locally stored app data, subject to your device’s backup and operating-system behavior. You can also remove or change individual alarms and preferences inside the app.</p>
       </section>
 
       <section>
-        <h2>4. Analytics</h2>
-        <p>If a Mixpanel analytics token is configured for your build, Wayykup sends selected product-usage events to Mixpanel. Events can include alarm creation or changes, challenge type and alarm time, ring and completion timestamps, ring latency, device model, snooze count, subscription plan type, and successful object recognition. These events help us understand app reliability and feature use. The app does not intentionally send your camera image, QR contents, onboarding answers, or payment-card details in these analytics events.</p>
+        <h2>5. Analytics</h2>
+        <p>If a Mixpanel analytics token is configured for your build, Wayykup sends selected product-usage events to Mixpanel. Events can include alarm creation or changes, challenge type and alarm time, ring and completion timestamps, ring latency, device model, snooze count, subscription plan type, and successful object recognition. Yell and Face Challenge events may include challenge type, mode, duration, attempt count, fallback or permission outcome, and the requested Face gesture sequence. They do not include raw audio, video, camera frames, face measurements, or identity templates. These events help us understand app reliability and feature use. The app does not intentionally send your camera image, QR contents, onboarding answers, or payment-card details in these analytics events.</p>
         <p>Analytics are not initialized in builds without a configured Mixpanel token, and the app’s web preview does not initialize Mixpanel. Mixpanel processes data under its own privacy and retention practices. See <a href="https://mixpanel.com/legal/privacy-policy/">Mixpanel’s Privacy Policy</a>.</p>
       </section>
 
       <section>
-        <h2>5. Subscriptions and service providers</h2>
+        <h2>6. Subscriptions and service providers</h2>
         <p>When available, in-app subscriptions are managed through RevenueCat and the Apple App Store or Google Play. These providers handle purchase transactions, subscription status, renewals, restores, and related technical data under their own privacy policies and terms. Wayykup uses subscription status to determine whether premium features are available. See <a href="https://www.revenuecat.com/privacy/">RevenueCat’s Privacy Policy</a>, <a href="https://www.apple.com/legal/privacy/">Apple’s Privacy Policy</a>, and <a href="https://policies.google.com/privacy">Google’s Privacy Policy</a>.</p>
         <p>Wayykup also uses Expo services to deliver app updates when configured. The app schedules local alarms and notifications on your device; it does not currently register a remote push-notification token for Wayykup push campaigns.</p>
       </section>
 
       <section>
-        <h2>6. How information is used</h2>
+        <h2>7. How information is used</h2>
         <ul>
           <li>To create, schedule, play, and manage alarms and wake-up challenges.</li>
           <li>To keep alarm and challenge settings, preferences, and wake-up history available on your device.</li>
@@ -195,19 +202,19 @@
       </section>
 
       <section>
-        <h2>7. Sharing and international processing</h2>
+        <h2>8. Sharing and international processing</h2>
         <p>Wayykup does not sell your personal information. Information may be processed by the providers described above when their services are enabled, or disclosed if required by law or needed to protect users, the app, or our legal rights. Those providers may process information in countries other than the country where you live and apply their own safeguards and policies.</p>
       </section>
 
       <section>
-        <h2>8. Retention and security</h2>
+        <h2>9. Retention and security</h2>
         <p>Information stored only on your device remains there until you remove it, clear app storage, or uninstall the app, subject to device backups and operating-system behavior. Analytics and subscription-provider records are retained according to the provider’s policies and settings. We use app-private storage and rely on platform protections, but no method of storage or transmission can be guaranteed completely secure.</p>
       </section>
 
       <section>
-        <h2>9. Your choices and privacy rights</h2>
+        <h2>10. Your choices and privacy rights</h2>
         <ul>
-          <li>Use device settings to revoke camera, notification, or other permissions. Some app features may then be unavailable.</li>
+          <li>Use device settings to revoke camera, microphone, notification, or other permissions. Some app features may then be unavailable.</li>
           <li>Manage or cancel a subscription through the app store where you purchased it.</li>
           <li>Remove local information by deleting alarms, clearing the app’s storage, or uninstalling Wayykup.</li>
           <li>Depending on where you live, you may have rights to access, correct, delete, or restrict certain personal information. Contact us using the details below to make a request. Information held by Mixpanel, RevenueCat, Apple, or Google may need to be requested from that provider.</li>
@@ -215,17 +222,17 @@
       </section>
 
       <section>
-        <h2>10. Children’s privacy</h2>
+        <h2>11. Children’s privacy</h2>
         <p>Wayykup is not designed for children under 13, and we do not knowingly seek to collect personal information from children under 13. If you believe a child has provided personal information, please contact us so we can review the request. Where local law sets a higher age for digital consent, that local requirement applies.</p>
       </section>
 
       <section>
-        <h2>11. Changes to this policy</h2>
+        <h2>12. Changes to this policy</h2>
         <p>We may update this policy as Wayykup’s features or data practices change. We will update the effective date above and, where required, provide additional notice or obtain consent.</p>
       </section>
 
       <div class="contact">
-        <h2>12. Contact</h2>
+        <h2>13. Contact</h2>
         <p>For privacy questions or requests, contact the Wayykup team:</p>
         <p><a href="mailto:support@wayykup.app">support@wayykup.app</a></p>
       </div>

@@ -32,6 +32,7 @@ class RingService : Service() {
   private val handler = Handler(Looper.getMainLooper())
   private var completedByChallenge = false
   private var currentTier = 0
+  private var alarmAudioDucked = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,6 +81,26 @@ class RingService : Service() {
         stopSelf(startId)
         return START_NOT_STICKY
       }
+      ACTION_SET_AUDIO_DUCKED -> {
+        alarmAudioDucked = intent.getBooleanExtra(EXTRA_AUDIO_DUCKED, false)
+        if (alarmAudioDucked) {
+          player?.setVolume(0f, 0f)
+        } else {
+          val targetVolume = volumeForTier(currentTier)
+          val durationMs = intent.getLongExtra(EXTRA_AUDIO_FADE_DURATION_MS, 600L).coerceIn(0L, 2_000L)
+          val steps = (durationMs / AUDIO_FADE_STEP_MS).coerceAtLeast(1L).toInt()
+          val stepDelayMs = (durationMs / steps).coerceAtLeast(1L)
+          for (step in 1..steps) {
+            handler.postDelayed({
+              if (!alarmAudioDucked) {
+                val volume = targetVolume * step / steps
+                player?.setVolume(volume, volume)
+              }
+            }, step * stepDelayMs)
+          }
+        }
+        return START_NOT_STICKY
+      }
       ACTION_START -> startRing(intent)
       else -> return START_NOT_STICKY
     }
@@ -99,6 +120,8 @@ class RingService : Service() {
     occurrenceId = intent.getStringExtra(AlarmContract.EXTRA_OCCURRENCE_ID)
       ?: AlarmStore.occurrenceId(alarmId ?: return, scheduledAt)
     completedByChallenge = false
+    alarmAudioDucked = false
+    currentTier = if (currentAlarm.optString("sound") in HIGH_INTENSITY_SOUNDS) 2 else 0
 
     startForeground(NOTIFICATION_ID, buildNotification(currentAlarm))
     val timeZone = intent.getStringExtra(AlarmContract.EXTRA_TIME_ZONE)
@@ -108,7 +131,7 @@ class RingService : Service() {
     val latency = ringStartedAt - scheduledAt
     Log.i(
       TAG,
-      "event=fired event=ringStarted alarmId=$alarmId occurrenceId=$occurrenceId latencyMs=$latency device=${Build.MANUFACTURER}/${Build.MODEL} android=${Build.VERSION.RELEASE}"
+      "event=fired event=ringStarted alarmId=$alarmId occurrenceId=$occurrenceId testAlarm=${currentAlarm.optBoolean("testAlarm", false)} latencyMs=$latency device=${Build.MANUFACTURER}/${Build.MODEL} android=${Build.VERSION.RELEASE}"
     )
     sendBroadcast(
       Intent(AlarmContract.ACTION_RING_STARTED)
@@ -191,19 +214,32 @@ class RingService : Service() {
           setDataSource(this@RingService, android.net.Uri.parse(customSoundUri))
         } else {
           val resourceName = soundName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-          val resourceId = resources.getIdentifier(resourceName, "raw", packageName)
-            .takeIf { it != 0 }
-            ?: resources.getIdentifier("alarm_tone", "raw", packageName)
-          if (resourceId == 0) {
-            Log.e(TAG, "No bundled alarm resource for '$soundName' or alarm_tone")
-            return
+          val resourceId = when (resourceName) {
+            "dread_siren" -> R.raw.dread_siren
+            "panic_engine" -> R.raw.panic_engine
+            "nightmare" -> R.raw.nightmare
+            "final_warning" -> R.raw.final_warning
+            "beacon" -> R.raw.beacon
+            "buzz_saw" -> R.raw.buzz_saw
+            "kitchen_phone" -> R.raw.kitchen_phone
+            "pulse" -> R.raw.pulse
+            "honk" -> R.raw.honk
+            "inferno" -> R.raw.inferno
+            "redline" -> R.raw.redline
+            "bugle_call" -> R.raw.bugle_call
+            "countdown" -> R.raw.countdown
+            "jackhammer" -> R.raw.jackhammer
+            "warpath" -> R.raw.warpath
+            else -> R.raw.alarm_tone
           }
           setDataSource(this@RingService, android.net.Uri.parse("android.resource://$packageName/$resourceId"))
         }
         isLooping = true
         setOnPreparedListener {
-          it.setVolume(volumeForTier(currentTier), volumeForTier(currentTier))
+          val volume = if (alarmAudioDucked) 0f else volumeForTier(currentTier)
+          it.setVolume(volume, volume)
           it.start()
+          Log.i(TAG, "event=alarm_audio_started alarmId=$alarmId sound=$soundName tier=$currentTier")
         }
         setOnErrorListener { _, what, extra ->
           Log.e(TAG, "Bundled alarm playback failed what=$what extra=$extra")
@@ -249,7 +285,7 @@ class RingService : Service() {
         return
       }
       currentTier = (currentTier + 1).coerceAtMost(3)
-      player?.setVolume(volumeForTier(currentTier), volumeForTier(currentTier))
+      if (!alarmAudioDucked) player?.setVolume(volumeForTier(currentTier), volumeForTier(currentTier))
       handler.postDelayed(this, ESCALATION_INTERVAL_MS)
     }
   }
@@ -305,11 +341,16 @@ class RingService : Service() {
   }
 
   companion object {
+    private val HIGH_INTENSITY_SOUNDS = setOf("Dread Siren", "Panic Engine", "Nightmare", "Final Warning")
     private const val TAG = "WayykupAlarm"
     private const val NOTIFICATION_ID = 42100
     private const val ESCALATION_INTERVAL_MS = 60 * 1000L
+    private const val AUDIO_FADE_STEP_MS = 40L
     private const val MAX_RING_MS = 30 * 60 * 1000L
     const val ACTION_START = "com.wayykup.alarm.SERVICE_START"
     const val ACTION_SERVICE_COMPLETED = "com.wayykup.alarm.SERVICE_COMPLETED"
+    const val ACTION_SET_AUDIO_DUCKED = "com.wayykup.alarm.SERVICE_SET_AUDIO_DUCKED"
+    const val EXTRA_AUDIO_DUCKED = "audioDucked"
+    const val EXTRA_AUDIO_FADE_DURATION_MS = "audioFadeDurationMs"
   }
 }

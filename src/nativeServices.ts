@@ -16,7 +16,7 @@ import {
 export type AlarmRecord = {
   id: string;
   time: string;
-  task: 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats';
+  task: 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats' | 'Yell to Wake' | 'Face Challenge';
   days: string[];
   sound: string;
   customSoundUri?: string;
@@ -28,6 +28,8 @@ export type AlarmRecord = {
   huntTarget?: string;
   mathDifficulty: 'Easy' | 'Medium' | 'Hard';
   shakeCount?: number;
+  yellMode?: 'loud' | 'whisper';
+  fallbackTask?: 'Math' | 'Memory';
 };
 
 const ALARMS_STORAGE_KEY = 'savage-alarm:alarms:v1';
@@ -114,11 +116,10 @@ export async function requestAlarmNotifications(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
 
   const current = await Notifications.getPermissionsAsync();
-  const permission = current.granted ? current : await Notifications.requestPermissionsAsync();
-  if (!permission.granted) return false;
+  if (!current.granted) await Notifications.requestPermissionsAsync();
   if (!isNativeAlarmAvailable) return false;
   const health = await requestNativeAlarmPermissions();
-  return health.canRingNow;
+  return health.canSchedule;
 }
 
 export async function syncAlarmNotifications(alarms: AlarmRecord[]): Promise<void> {
@@ -129,11 +130,8 @@ export async function syncAlarmNotifications(alarms: AlarmRecord[]): Promise<voi
     throw new Error('Native alarms are unavailable in Expo Go. Install a Wayykup development build.');
   }
   const health = await getNativeAlarmHealth();
-  if (!health.canRingNow) {
+  if (!health.canSchedule) {
     throw new Error(alarmHealthMessage(health));
-  }
-  if (!health.testAlarmPassed) {
-    throw new Error('Complete Wayykup’s 60-second ring test before scheduling personal alarms.');
   }
   const previousIdsText = await AsyncStorage.getItem(NATIVE_ALARMS_STORAGE_KEY);
   const previousIds = previousIdsText ? JSON.parse(previousIdsText) as unknown : [];
@@ -163,6 +161,7 @@ export async function getAlarmHealth(): Promise<AlarmHealth> {
       fullScreenIntent: false,
       notifications: false,
       batteryRestricted: false,
+      canSchedule: false,
       canRingNow: false,
       platform: 'unsupported',
       reliability: 'unavailable',
@@ -197,7 +196,10 @@ export function getBatteryRestrictionGuidance(deviceModel?: string): string {
 }
 
 function alarmHealthMessage(health: AlarmHealth): string {
-  if (!health.notifications) return 'Allow Wayykup notifications before scheduling an alarm.';
+  if (!health.canSchedule && !health.exactAlarm) return 'Allow Wayykup to schedule exact alarms in system settings.';
+  if (!health.canSchedule && !health.notifications) return 'Allow Wayykup notifications before scheduling an alarm.';
+  if (!health.canSchedule) return 'Wayykup cannot schedule an alarm. Check its alarm permissions in Settings.';
+  if (!health.notifications) return 'The alarm can ring, but allow Wayykup notifications to see its alarm alert.';
   if (!health.exactAlarm) return 'Allow Wayykup to schedule exact alarms in system settings.';
   if (!health.fullScreenIntent && health.platform === 'android') {
     return 'Allow full-screen alarm notifications for Wayykup in system settings.';

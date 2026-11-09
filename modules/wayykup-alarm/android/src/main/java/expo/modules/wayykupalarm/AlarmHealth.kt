@@ -19,13 +19,15 @@ internal object AlarmHealth {
       context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() == true
     val batteryRestricted =
       context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) != true
-    val canRing = exact && notifications && fullScreen
+    val canSchedule = exact
+    val canRing = canSchedule && notifications && fullScreen
     return mapOf(
       "authorized" to (exact && notifications),
       "exactAlarm" to exact,
       "fullScreenIntent" to fullScreen,
       "notifications" to notifications,
       "batteryRestricted" to batteryRestricted,
+      "canSchedule" to canSchedule,
       "canRingNow" to canRing,
       "platform" to "android",
       "testAlarmPassed" to AlarmStore.testAlarmPassed(context),
@@ -33,17 +35,6 @@ internal object AlarmHealth {
       "osVersion" to "Android ${Build.VERSION.RELEASE}",
       "reliability" to "native"
     )
-  }
-
-  fun openPermissionSettings(context: Context) {
-    val health = get(context)
-    val exact = health["exactAlarm"] == true
-    val fullScreen = health["fullScreenIntent"] == true
-    when {
-      !exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> openSettings(context, "exactAlarm")
-      !fullScreen && Build.VERSION.SDK_INT >= 34 -> openSettings(context, "fullScreenIntent")
-      else -> openSettings(context, "battery")
-    }
   }
 
   fun openSettings(context: Context, kind: String) {

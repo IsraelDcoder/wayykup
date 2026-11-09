@@ -33,7 +33,7 @@ import ReanimatedAnimated, {
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
+import { requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import * as DocumentPicker from 'expo-document-picker';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
@@ -63,6 +63,7 @@ import {
   importSound as importAlarmSound,
   isNativeAlarmAvailable,
   rearm as rearmNativeAlarm,
+  setAlarmAudioDucked,
   startTestAlarm,
   type AlarmHealth,
   type RingStartedEvent,
@@ -73,7 +74,6 @@ import { WayykupIcon } from './src/components/WayykupIcon';
 import {
   calculateStreaks,
   countsTowardStreak,
-  localDateKey,
   timeToWakeMs,
 } from './src/stats/logic';
 import {
@@ -81,6 +81,7 @@ import {
   earnFreezeForStreak,
   getOccurrences,
   getStreakFreezes,
+  makeOccurrence,
   markOccurrenceRinging,
   materializeOccurrences,
   reconcileOccurrences,
@@ -95,12 +96,17 @@ import { registerOccurrenceReconciliationTask } from './src/stats/background';
 import type { Occurrence, StreakFreeze } from './src/stats/types';
 import { OnboardingFlow, type OnboardingSetup } from './src/OnboardingFlow';
 import { chooseHuntTarget, HUNT_ITEMS, matchesHuntObject } from './src/challenges/objects';
+import { FaceChallenge } from './src/challenges/FaceChallenge';
+import { YellChallenge } from './src/challenges/YellChallenge';
+import { WAKE_CHALLENGE_CONFIG } from './src/challenges/config';
+import type { YellMode } from './src/challenges/yellMachine';
 import { GlassNavigationBar } from './src/components/GlassNavigationBar';
 
-type Task = 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats';
+type Task = 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats' | 'Yell to Wake' | 'Face Challenge';
+type FallbackTask = 'Math' | 'Memory';
 type MathDifficulty = 'Easy' | 'Medium' | 'Hard';
 type Screen = 'welcome' | 'proof' | 'paywall' | 'home' | 'editor' | 'alarm' | 'stats' | 'streak' | 'settings';
-type PaywallStage = 'intro' | 'reminder' | 'timeline' | 'plans' | 'gift' | 'discount';
+type PaywallStage = 'intro' | 'reminder' | 'timeline' | 'gift' | 'discount';
 type Alarm = {
   id: string;
   time: string;
@@ -116,6 +122,8 @@ type Alarm = {
   huntTarget?: string;
   mathDifficulty: MathDifficulty;
   shakeCount: number;
+  yellMode?: YellMode;
+  fallbackTask?: FallbackTask;
 };
 
 const RED = '#FF1717';
@@ -129,6 +137,8 @@ const TASKS: { name: Task; icon: string; detail: string }[] = [
   { name: 'Push-ups', icon: '↗', detail: 'Complete ten controlled reps' },
   { name: 'Squats', icon: '↘', detail: 'Complete ten controlled reps' },
   { name: 'Math', icon: '∑', detail: 'Solve a problem to wake up' },
+  { name: 'Yell to Wake', icon: '◉', detail: 'Raise your voice to fill the power meter' },
+  { name: 'Face Challenge', icon: '◉', detail: 'Complete a random gesture sequence' },
   { name: 'Shake', icon: '↯', detail: 'Shake it off. No shortcuts.' },
   { name: 'QR scan', icon: '▦', detail: 'Get up and scan your code' },
   { name: 'Memory', icon: '▤', detail: 'Repeat the sequence' },
@@ -141,6 +151,10 @@ const MATH_CHALLENGES: Record<MathDifficulty, { equation: string; answer: number
   Hard: { equation: '136 × 7 − 44', answer: 908 },
 };
 const SOUNDS = [
+  'Dread Siren',
+  'Panic Engine',
+  'Nightmare',
+  'Final Warning',
   'Beacon',
   'Buzz Saw',
   'Kitchen Phone',
@@ -155,6 +169,10 @@ const SOUNDS = [
   'Warpath',
 ];
 const SOUND_ASSETS: Record<string, number> = {
+  'Dread Siren': require('./assets/dread-siren.wav'),
+  'Panic Engine': require('./assets/panic-engine.wav'),
+  Nightmare: require('./assets/nightmare.wav'),
+  'Final Warning': require('./assets/final-warning.wav'),
   'Air raid': require('./assets/alarm-tone.wav'),
   'Bugle call': require('./assets/bugle-call.wav'),
   Redline: require('./assets/redline.wav'),
@@ -229,6 +247,8 @@ function taskLabel(task: Task, alarm?: Alarm) {
     case 'Toothbrush': return 'Toothbrush';
     case 'Push-ups': return `Push-ups · ${EXERCISE_REP_TARGET} reps`;
     case 'Squats': return `Squats · ${EXERCISE_REP_TARGET} reps`;
+    case 'Yell to Wake': return `Yell to Wake · ${(alarm?.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode).toUpperCase()}`;
+    case 'Face Challenge': return 'Face Challenge · 3 gestures';
   }
 }
 function taskIcon(task: Task) {
@@ -830,8 +850,10 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openAlarmSwipeId, setOpenAlarmSwipeId] = useState<{ id: string; action: 'edit' | 'delete' } | null>(null);
   const [expandedEditorSection, setExpandedEditorSection] = useState<'sound' | 'task' | null>(null);
-  const [paywallReturnScreen, setPaywallReturnScreen] = useState<Screen>('proof');
-  const [paywallStage, setPaywallStage] = useState<PaywallStage>('plans');
+  const [challengePreviewing, setChallengePreviewing] = useState(false);
+  const [yellAlarmAudible, setYellAlarmAudible] = useState(false);
+  const [alarmFallbackReason, setAlarmFallbackReason] = useState<string | null>(null);
+  const [paywallStage, setPaywallStage] = useState<PaywallStage>('intro');
   const [draft, setDraft] = useState<Alarm>({
     id: '',
     time: '07:00',
@@ -842,6 +864,8 @@ export default function App() {
     savage: false,
     mathDifficulty: 'Medium',
     shakeCount: 100,
+    yellMode: WAKE_CHALLENGE_CONFIG.yell.defaultMode,
+    fallbackTask: WAKE_CHALLENGE_CONFIG.fallbackTask,
   });
   const [now, setNow] = useState(() => new Date());
   const [answer, setAnswer] = useState('');
@@ -862,19 +886,22 @@ export default function App() {
   const [qrScanned, setQrScanned] = useState(false);
   const [memoryEntry, setMemoryEntry] = useState('');
   const [memorySequenceVisible, setMemorySequenceVisible] = useState(false);
+  const [previewingSound, setPreviewingSound] = useState<string | null>(null);
   const [snoozeLevels, setSnoozeLevels] = useState<Record<string, number>>({});
   const [challengeDurationSeconds, setChallengeDurationSeconds] = useState(0);
   const [availablePackages, setAvailablePackages] = useState<Parameters<typeof Purchases.purchasePackage>[0][]>([]);
   const [billingError, setBillingError] = useState('');
   const [billingBusy, setBillingBusy] = useState(false);
   const [hasPremium, setHasPremium] = useState(false);
-  const [plan, setPlan] = useState<'yearly' | 'monthly' | 'weekly'>('yearly');
+  const [plan, setPlan] = useState<'yearly' | 'monthly'>('yearly');
   const [plansModalVisible, setPlansModalVisible] = useState(false);
   const [currentPlanModalVisible, setCurrentPlanModalVisible] = useState(false);
   const [lastAlarm, setLastAlarm] = useState<Alarm>(starterAlarms[0]);
   const snoozeLevel = snoozeLevels[lastAlarm.id] ?? 0;
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const alarmPlayer = useAudioPlayer(require('./assets/alarm-tone.wav'));
+  const soundPreviewPlayer = useAudioPlayer(require('./assets/dread-siren.wav'));
+  const soundPreviewTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousAcceleration = useRef<{ magnitude: number; timestamp: number; x: number; y: number; z: number } | null>(null);
   const lastExerciseRepAt = useRef(0);
   const exerciseMotionActive = useRef(false);
@@ -882,6 +909,7 @@ export default function App() {
   const challengeCompleted = useRef(false);
   const challengeStartedAt = useRef(0);
   const activeChallengeAlarmId = useRef<string | null>(null);
+  const activeYellAlarm = useRef(false);
   const activeOccurrenceId = useRef<string | null>(null);
   const activeRingStartedAt = useRef(0);
   const alarmsRef = useRef(alarms);
@@ -989,7 +1017,7 @@ export default function App() {
     if (!alarmsLoaded || Platform.OS === 'web') return;
     const updateSchedule = async () => {
       try {
-        if (alarmHealth?.canRingNow && alarmHealth.testAlarmPassed) {
+        if (alarmHealth?.canSchedule) {
           await syncAlarmNotifications(alarms);
         } else {
           await materializeOccurrences(alarms);
@@ -998,7 +1026,7 @@ export default function App() {
       } catch (error) {
         console.error('Alarm schedule and occurrence history could not be synchronized.', error);
         setStatsError('Alarm history could not be synchronized.');
-        if (alarmHealth?.canRingNow && alarmHealth.testAlarmPassed) {
+        if (alarmHealth?.canSchedule) {
           Alert.alert(
             'Alarm scheduling failed',
             error instanceof Error ? error.message : 'Your alarm changes were saved, but the operating system did not accept the notification schedule.',
@@ -1054,7 +1082,12 @@ export default function App() {
             && !savedAlarms[1].enabled;
           setAlarms(isUnmodifiedStarterData
             ? starterAlarms
-            : savedAlarms.map((alarm) => ({ ...alarm, shakeCount: alarm.shakeCount ?? 100 })));
+            : savedAlarms.map((alarm) => ({
+              ...alarm,
+              shakeCount: alarm.shakeCount ?? 100,
+              yellMode: alarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
+              fallbackTask: alarm.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask,
+            })));
         }
       })
       .catch((error: unknown) => {
@@ -1073,8 +1106,7 @@ export default function App() {
       .then(async (progress) => {
         if (!active) return;
         if (progress?.onboardingComplete) {
-          setPaywallReturnScreen('home');
-          setPaywallStage('plans');
+          setPaywallStage('intro');
           setScreen('paywall');
           return;
         }
@@ -1086,8 +1118,7 @@ export default function App() {
 
           const migratedProgress = { onboardingComplete: true, appUnlocked: false };
           await persistAppProgress(migratedProgress);
-          setPaywallReturnScreen('home');
-          setPaywallStage('plans');
+          setPaywallStage('intro');
           setScreen('paywall');
         }
       })
@@ -1121,10 +1152,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (startupProgressLoaded && hasPremium && screen === 'paywall' && paywallReturnScreen !== 'settings') {
+    if (startupProgressLoaded && hasPremium && screen === 'paywall') {
       setScreen('home');
     }
-  }, [hasPremium, paywallReturnScreen, screen, startupProgressLoaded]);
+  }, [hasPremium, screen, startupProgressLoaded]);
 
   useEffect(() => {
     if (screen !== 'settings' || Platform.OS === 'web') return;
@@ -1181,10 +1212,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (screen !== 'alarm') return;
+    if (screen !== 'alarm' && screen !== 'paywall') return;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => true);
     return () => subscription.remove();
   }, [screen]);
+
+  useEffect(() => {
+    if (!startupProgressLoaded || hasPremium || screen === 'welcome' || screen === 'proof' || screen === 'paywall') return;
+    setPaywallStage('intro');
+    setScreen('paywall');
+  }, [hasPremium, screen, startupProgressLoaded]);
 
   useEffect(() => {
     if (screen !== 'alarm') return;
@@ -1208,7 +1245,9 @@ export default function App() {
         if (!active) return;
         alarmPlayer.replace(lastAlarm.customSoundUri ?? SOUND_ASSETS[lastAlarm.sound] ?? SOUND_ASSETS['Air raid']);
         alarmPlayer.loop = true;
-        alarmPlayer.volume = Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
+        alarmPlayer.volume = lastAlarm.task === 'Yell to Wake'
+          ? 0
+          : Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
         alarmPlayer.setActiveForLockScreen(
           true,
           { title: 'WAYYKUP', artist: lastAlarm.customSoundName ?? lastAlarm.sound },
@@ -1225,12 +1264,38 @@ export default function App() {
       alarmPlayer.pause();
       alarmPlayer.clearLockScreenControls();
     };
-  }, [screen, alarmPlayer, keepAlarmPlayingDuringChallenges, lastAlarm.customSoundUri, lastAlarm.sound]);
+  }, [screen, alarmPlayer, keepAlarmPlayingDuringChallenges, lastAlarm.customSoundUri, lastAlarm.sound, lastAlarm.task]);
 
   useEffect(() => {
     if (screen !== 'alarm') return;
+    if (lastAlarm.task === 'Yell to Wake') return;
     alarmPlayer.volume = Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
-  }, [alarmPlayer, screen, snoozeLevel, wrongAnswers]);
+  }, [alarmPlayer, lastAlarm.task, screen, snoozeLevel, wrongAnswers]);
+
+  useEffect(() => {
+    if (screen === 'editor') return;
+    if (soundPreviewTimeout.current) clearTimeout(soundPreviewTimeout.current);
+    soundPreviewTimeout.current = null;
+    soundPreviewPlayer.pause();
+  }, [screen, soundPreviewPlayer]);
+
+  useEffect(() => {
+    if (screen !== 'alarm' || lastAlarm.task !== 'Yell to Wake'
+      || (activeOccurrenceId.current && isNativeAlarmAvailable && Platform.OS !== 'web')
+      || keepAlarmPlayingDuringChallenges === false) return undefined;
+    const targetVolume = yellAlarmAudible
+      ? Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1)
+      : 0;
+    const startingVolume = alarmPlayer.volume;
+    const startedAt = Date.now();
+    const interval = setInterval(() => {
+      const progress = Math.min(1, (Date.now() - startedAt) / WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
+      const volume = startingVolume + (targetVolume - startingVolume) * progress;
+      alarmPlayer.volume = Math.max(0, Math.min(1, volume));
+      if (progress === 1) clearInterval(interval);
+    }, 40);
+    return () => clearInterval(interval);
+  }, [alarmPlayer, keepAlarmPlayingDuringChallenges, lastAlarm.task, screen, snoozeLevel, wrongAnswers, yellAlarmAudible]);
 
   useEffect(() => {
     if (screen !== 'alarm' || lastAlarm.task !== 'Memory') {
@@ -1302,17 +1367,17 @@ export default function App() {
     }
     try {
       const health = await refreshAlarmHealth();
-      if (!health?.canRingNow) {
+      if (!health?.canSchedule) {
         Alert.alert(
           'Alarm permissions needed',
-          'Enable notifications, exact alarms, and full-screen alarm access first. Use the alarm health panel to open the matching system setting.',
+          'Allow Wayykup to schedule exact alarms first. Use the alarm health panel to open the required system setting.',
         );
         return;
       }
       await startTestAlarm();
       Alert.alert(
         '60-second test scheduled',
-        'The native alarm will ring in 60 seconds. Complete its challenge to unlock alarm scheduling.',
+        'The native alarm will ring in 60 seconds. Use this optional test to verify alarm sound and challenge launch on this device.',
       );
     } catch (error) {
       console.error('The 60-second native alarm test could not be scheduled.', error);
@@ -1321,18 +1386,8 @@ export default function App() {
   };
 
   const openNewAlarm = () => {
-    if (!isNativeAlarmAvailable || alarmHealth?.testAlarmPassed !== true) {
-      Alert.alert(
-        'Test the alarm first',
-        'Complete Wayykup’s 60-second native ring test before adding an alarm.',
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Run test', onPress: () => { void beginAlarmTest(); } },
-        ],
-      );
-      return;
-    }
     setOpenAlarmSwipeId(null);
+    setPreviewingSound(null);
     setEditingId(null);
     setDraft({
       id: '',
@@ -1347,14 +1402,18 @@ export default function App() {
       huntTarget: 'Toothbrush',
       mathDifficulty: 'Medium',
       shakeCount: 100,
+      yellMode: WAKE_CHALLENGE_CONFIG.yell.defaultMode,
+      fallbackTask: WAKE_CHALLENGE_CONFIG.fallbackTask,
     });
     setLinkingQr(false);
+    setChallengePreviewing(false);
     setExpandedEditorSection(null);
     setScreen('editor');
   };
 
   const openEditAlarm = (alarm: Alarm) => {
     setOpenAlarmSwipeId(null);
+    setPreviewingSound(null);
     setEditingId(alarm.id);
     setDraft({ ...alarm });
     setLinkingQr(false);
@@ -1391,10 +1450,6 @@ export default function App() {
   };
 
   const saveAlarm = async () => {
-    if (!editingId && (!isNativeAlarmAvailable || alarmHealth?.testAlarmPassed !== true)) {
-      Alert.alert('Test the alarm first', 'Complete the 60-second ring test before creating an alarm.');
-      return;
-    }
     const huntTargets = draft.huntItems?.length ? draft.huntItems : draft.huntTarget ? [draft.huntTarget] : [];
     if (draft.task === 'Object Hunt' && !huntTargets.length) {
       Alert.alert('Choose an object', 'Select at least one target object for Object Hunt before saving this challenge.');
@@ -1408,12 +1463,17 @@ export default function App() {
       trackEvent('alarm_created', { task: draft.task, time: draft.time });
     }
     try {
-      const granted = await requestAlarmNotifications();
-      await refreshAlarmHealth();
-      if (!granted) {
+      await requestAlarmNotifications();
+      const health = await refreshAlarmHealth();
+      if (!health?.canSchedule) {
         Alert.alert(
           'Alarm permissions incomplete',
-          'Your alarm details were saved, but Wayykup will not schedule a ring until all required alarm permissions are enabled.',
+          'Your alarm details were saved, but Wayykup cannot schedule the ring until exact-alarm access is enabled.',
+        );
+      } else if (!health.canRingNow) {
+        Alert.alert(
+          'Alarm scheduled with limited access',
+          'The alarm is scheduled to ring, but allow notifications and full-screen alarm access so its challenge can appear over the lock screen.',
         );
       }
     } catch (error) {
@@ -1446,6 +1506,7 @@ export default function App() {
     const sameOccurrence = occurrenceId !== null && activeOccurrenceId.current === occurrenceId;
     activeChallengeAlarmId.current = alarm.id;
     activeOccurrenceId.current = occurrenceId;
+    activeYellAlarm.current = alarm.task === 'Yell to Wake';
     if (!sameOccurrence) activeRingStartedAt.current = firstRingAt;
     setAnswer('');
     setWrongAnswers(0);
@@ -1462,6 +1523,9 @@ export default function App() {
     setShuffleDisplayTarget(null);
     setChallengeShuffleVisible(alarm.task === 'Object Hunt');
     setHuntRecognized(false);
+    setYellAlarmAudible(false);
+    setAlarmFallbackReason(null);
+    setChallengePreviewing(false);
     challengeCompleted.current = false;
     lastExerciseRepAt.current = 0;
     exerciseMotionActive.current = false;
@@ -1484,11 +1548,12 @@ export default function App() {
       device_model: alarmHealth?.deviceModel ?? 'unknown',
     });
     const savedAlarm = alarmsRef.current.find((item) => item.id === event.alarmId);
-    const testTasks: Task[] = ['Math', 'Shake', 'QR scan', 'Memory', 'Object Hunt', 'Toothbrush', 'Push-ups', 'Squats'];
+    const testTasks: Task[] = ['Math', 'Shake', 'QR scan', 'Memory', 'Object Hunt', 'Toothbrush', 'Push-ups', 'Squats', 'Yell to Wake', 'Face Challenge'];
     const testTask = testTasks.find((task) => task === event.challenge) ?? 'Math';
+    const testTime = new Date(event.scheduledAt);
     const alarm: Alarm | null = savedAlarm ?? (event.testAlarm ? {
       id: event.alarmId,
-      time: '07:00',
+      time: `${String(testTime.getHours()).padStart(2, '0')}:${String(testTime.getMinutes()).padStart(2, '0')}`,
       task: testTask,
       days: [],
       sound: event.sound,
@@ -1537,6 +1602,12 @@ export default function App() {
     if (challengeCompleted.current) return;
     challengeCompleted.current = true;
     activeChallengeAlarmId.current = null;
+    activeYellAlarm.current = false;
+    if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
+      void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
+        console.error('Native alarm audio could not be restored after Yell to Wake.', error);
+      });
+    }
     const completedAt = Date.now();
     const challengeDurationMs = Math.max(
       0,
@@ -1561,20 +1632,38 @@ export default function App() {
       return;
     }
 
+    let localCompletionSaved = false;
     try {
       const previousOccurrence = occurrences
         .filter((item) => item.id !== occurrenceId && item.status === 'completed' && item.completedAt != null)
         .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
       const previousWakeDurationMs = previousOccurrence ? timeToWakeMs(previousOccurrence) : null;
       const streakBefore = calculateStreaks(occurrences, usedFreezeDates(streakFreezes), completedAt).current;
+      const occurrenceLocalDate = occurrenceId.split(':').at(-1);
+      if (!occurrenceLocalDate || !/^\d{4}-\d{2}-\d{2}$/.test(occurrenceLocalDate)) {
+        throw new Error(`The completed wake-up has an invalid local date: ${occurrenceId}`);
+      }
+      const [year, month, day] = occurrenceLocalDate.split('-').map(Number);
+      const scheduledDate = new Date(year, month - 1, day);
+      const fallbackOccurrence = makeOccurrence(
+        lastAlarm,
+        scheduledDate,
+        Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      );
       await completeOccurrence(occurrenceId, completedAt, {
         shakesCounted: lastAlarm.task === 'Shake' ? shakeCount : undefined,
         steps: lastAlarm.task === 'Push-ups' || lastAlarm.task === 'Squats' ? exerciseReps : undefined,
         mathCorrect: lastAlarm.task === 'Math' ? mathCorrect + (mathAnsweredCorrectly ? 1 : 0) : undefined,
         mathAttempts: lastAlarm.task === 'Math' ? mathAttempts + (mathAnsweredCorrectly ? 1 : 0) : undefined,
         challengeDurationMs,
-      });
-      await cancelNativeAlarmChain(lastAlarm.id, 'completed');
+      }, fallbackOccurrence, activeRingStartedAt.current || completedAt);
+      localCompletionSaved = true;
+      try {
+        await cancelNativeAlarmChain(lastAlarm.id, 'completed');
+      } catch (error) {
+        console.error('Completed wake-up was saved, but the native alarm could not be stopped.', error);
+        Alert.alert('Wake-up saved', 'Your wake-up was recorded, but Wayykup could not stop the native alarm service.');
+      }
       await refreshAlarmHealth();
       let updatedOccurrences = await getOccurrences();
       const completedOccurrence = updatedOccurrences.find((item) => item.id === occurrenceId);
@@ -1599,6 +1688,14 @@ export default function App() {
         setScreen('stats');
       }
     } catch (error) {
+      if (localCompletionSaved) {
+        console.error('Wake-up was saved, but its Stats summary could not be refreshed.', error);
+        await refreshStats();
+        setStatsError('Wake-up saved. Some streak details could not be refreshed.');
+        Alert.alert('Wake-up saved', 'Your challenge completion was saved locally, but Wayykup could not refresh all streak details.');
+        setScreen('stats');
+        return;
+      }
       console.error('Completed alarm could not be recorded in local stats.', error);
       setStatsError('This wake-up could not be saved to Stats.');
       Alert.alert('Wake-up not saved', 'The challenge is complete, but Wayykup could not save this alarm session locally.');
@@ -1614,10 +1711,30 @@ export default function App() {
     mathCorrect,
     occurrences,
     refreshAlarmHealth,
+    refreshStats,
     shakeCount,
     snoozeLevel,
     streakFreezes,
   ]);
+
+  const switchToChallengeFallback = (reason: string) => {
+    activeYellAlarm.current = false;
+    if (Platform.OS === 'android') {
+      void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
+        console.error('Native alarm audio could not be restored for the fallback challenge.', error);
+      });
+    }
+    const fallbackAlarm: Alarm = {
+      ...lastAlarm,
+      task: lastAlarm.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask,
+    };
+    startChallengeRef.current(
+      fallbackAlarm,
+      activeOccurrenceId.current,
+      activeRingStartedAt.current || Date.now(),
+    );
+    setAlarmFallbackReason(reason);
+  };
 
   const recordChallengeFailure = useCallback((isMathAttempt = false) => {
     setWrongAnswers((count) => count + 1);
@@ -1752,9 +1869,13 @@ export default function App() {
   const snoozeAlarm = async () => {
     if (!lastAlarm.savage) return;
     try {
-      if (!isNativeAlarmAvailable || !alarmHealth?.canRingNow) {
+      if (!isNativeAlarmAvailable || !alarmHealth?.canSchedule) {
         Alert.alert('Snooze unavailable', 'Native alarm permissions are required to re-arm this alarm.');
         return;
+      }
+      if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
+        activeYellAlarm.current = false;
+        await setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
       }
       await rearmNativeAlarm(lastAlarm.id, 300_000);
       if (activeOccurrenceId.current) {
@@ -1783,6 +1904,12 @@ export default function App() {
           style: 'destructive',
           onPress: () => {
             challengeCompleted.current = true;
+            activeYellAlarm.current = false;
+            if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
+              void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
+                console.error('Native alarm audio could not be restored after emergency bypass.', error);
+              });
+            }
             const occurrenceId = activeOccurrenceId.current;
             activeOccurrenceId.current = null;
             activeChallengeAlarmId.current = null;
@@ -1830,9 +1957,7 @@ export default function App() {
 
       const wantedType = packageTypeOverride ?? (plan === 'yearly'
         ? Purchases.PACKAGE_TYPE.ANNUAL
-        : plan === 'monthly'
-          ? Purchases.PACKAGE_TYPE.MONTHLY
-          : Purchases.PACKAGE_TYPE.WEEKLY);
+        : Purchases.PACKAGE_TYPE.MONTHLY);
       const selectedPackage = packageOverride
         ? packages.find((item) => item.identifier === packageOverride.identifier)
         : packages.find((item) => item.packageType === wantedType);
@@ -1895,8 +2020,7 @@ export default function App() {
   const closeCurrentPlan = () => {
     setCurrentPlanModalVisible(false);
     if (!hasPremium) {
-      setPaywallReturnScreen('home');
-      setPaywallStage('plans');
+      setPaywallStage('intro');
       setScreen('paywall');
     }
   };
@@ -1957,7 +2081,6 @@ export default function App() {
       console.error('Onboarding alarm playback preference could not be saved.', error);
       Alert.alert('Could not save setting', 'The alarm playback preference could not be saved. You can update it later in Settings.');
     });
-    setPaywallReturnScreen('home');
     setPaywallStage('intro');
     void persistAppProgress({ onboardingComplete: true, appUnlocked: false }).catch((error: unknown) => {
       console.error('Onboarding completion could not be saved.', error);
@@ -2062,8 +2185,7 @@ export default function App() {
       ? availablePackages.find((item) => item.identifier === DISCOUNT_PACKAGE_ID)
       : undefined;
 
-    if (paywallStage !== 'plans') {
-      const isIntro = paywallStage === 'intro';
+    const isIntro = paywallStage === 'intro';
       const isReminder = paywallStage === 'reminder';
       const isTimeline = paywallStage === 'timeline';
       const isGift = paywallStage === 'gift';
@@ -2112,14 +2234,6 @@ export default function App() {
             contentContainerStyle={[styles.trialReminder, compactViewport && styles.trialReminderCompact]}
             showsVerticalScrollIndicator={false}
           >
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel="Go back"
-              onPress={() => setPaywallStage('intro')}
-              style={styles.trialReminderBack}
-            >
-              <Text style={styles.trialReminderBackGlyph}>‹</Text>
-            </TouchableOpacity>
             <Text style={[styles.trialReminderTitle, { fontSize: Math.min(42, windowWidth * 0.095), lineHeight: Math.min(50, windowWidth * 0.105) }]}>
               We&apos;ll send you{'\n'}a reminder before your{'\n'}free trial ends
             </Text>
@@ -2205,14 +2319,6 @@ export default function App() {
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.proTrialHeader}>
-              <TouchableOpacity
-                accessibilityRole="button"
-                accessibilityLabel="Go back"
-                onPress={() => setPaywallStage('reminder')}
-                style={styles.proTrialBack}
-              >
-                <Text style={styles.proTrialBackGlyph}>‹</Text>
-              </TouchableOpacity>
               <TouchableOpacity accessibilityRole="button" onPress={() => { void restorePurchases(); }}>
                 <Text style={styles.proTrialRestore}>Restore</Text>
               </TouchableOpacity>
@@ -2406,62 +2512,6 @@ export default function App() {
           </View>
         </ScrollView>
       );
-    }
-
-    return (
-    <ScrollView contentContainerStyle={styles.paywall} showsVerticalScrollIndicator={false}>
-      <View style={styles.paywallTop}>
-        <TouchableOpacity onPress={() => setScreen(paywallReturnScreen)}><Text style={styles.backText}>← BACK</Text></TouchableOpacity>
-        <Tag>03 / 03 · WAYYKUP PREMIUM</Tag>
-      </View>
-      <View style={styles.paywallHero}>
-        <View style={styles.paywallSeal}><Text style={styles.sealIcon}>✳</Text><Text style={styles.sealLabel}>EARLY{'\n'}ACCESS</Text></View>
-        <Text style={styles.eyebrow}>YOUR OLD ROUTINE ENDS HERE</Text>
-        <Text style={styles.paywallTitle}>Unlock the{'\n'}Ultimate{'\n'}<Text style={styles.redText}>Wake-Up Call.</Text></Text>
-        <Text style={styles.bodyCopy}>No soft landings. Just a better morning on the other side.</Text>
-      </View>
-      <View style={styles.perkList}>
-        {[
-          ['∞', 'Unlimited alarms', 'Set your whole week up right'],
-          ['↯', 'Every wake-up task', 'Math, shake, QR & memory'],
-          ['!', 'Extreme sounds', 'Make snooze a distant memory'],
-        ].map(([icon, title, detail]) => (
-          <View key={title} style={styles.perkRow}>
-            <View style={styles.perkIcon}><Text style={styles.perkIconText}>{icon}</Text></View>
-            <View style={styles.perkCopy}><Text style={styles.perkTitle}>{title}</Text><Text style={styles.perkDetail}>{detail}</Text></View>
-            <Text style={styles.checkmark}>✓</Text>
-          </View>
-        ))}
-      </View>
-      <View style={styles.planOptions}>
-        <TouchableOpacity onPress={() => setPlan('yearly')} style={[styles.planCard, plan === 'yearly' && styles.planSelected]}>
-          <View style={styles.planHeading}><Text style={styles.planName}>YEARLY</Text><Tag>{annualPackage?.product.introPrice ? 'INTRO OFFER' : 'ANNUAL'}</Tag></View>
-          <View style={styles.planPriceLine}><Text style={styles.planPrice}>{annualPackage?.product.priceString ?? 'Unavailable'}</Text><Text style={styles.planPeriod}> / year</Text></View>
-          <Text style={styles.planSub}>{annualPackage ? 'Store checkout confirms any introductory offer and renewal terms.' : 'Annual pricing is not configured in this store.'}</Text>
-          <View style={styles.planCardRadio}><View style={[styles.radio, plan === 'yearly' && styles.radioOn]}>{plan === 'yearly' && <View style={styles.radioDot} />}</View></View>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setPlan('weekly')} style={[styles.planCard, plan === 'weekly' && styles.planSelected]}>
-          <View style={styles.planHeading}><Text style={styles.planName}>WEEKLY</Text><Text style={styles.weeklyLabel}>FLEXIBLE</Text></View>
-          <View style={styles.planPriceLine}><Text style={styles.planPrice}>{availablePackages.find((item) => item.packageType === Purchases.PACKAGE_TYPE.WEEKLY)?.product.priceString ?? 'Unavailable'}</Text><Text style={styles.planPeriod}> / week</Text></View>
-          <Text style={styles.planSub}>The store confirms the weekly renewal terms before purchase.</Text>
-          <View style={styles.planCardRadio}><View style={[styles.radio, plan === 'weekly' && styles.radioOn]}>{plan === 'weekly' && <View style={styles.radioDot} />}</View></View>
-        </TouchableOpacity>
-      </View>
-      <ActionButton
-        label={billingBusy ? 'CONNECTING TO APP STORE…' : REVENUECAT_API_KEY ? 'CONTINUE TO STORE' : 'SUBSCRIPTIONS UNAVAILABLE'}
-        onPress={purchaseSubscription}
-        disabled={billingBusy || !REVENUECAT_API_KEY}
-      />
-      {!REVENUECAT_API_KEY && (
-        <Text accessibilityRole="alert" style={styles.billingError}>
-          Add the RevenueCat public SDK key to enable subscriptions.
-        </Text>
-      )}
-      {REVENUECAT_API_KEY && <TouchableOpacity onPress={restorePurchases} style={styles.restorePurchases}><Text style={styles.restoreText}>RESTORE PURCHASES</Text></TouchableOpacity>}
-      {!!billingError && <Text accessibilityRole="alert" style={styles.billingError}>{billingError}</Text>}
-      <Text style={styles.terms}>Any trial and renewal price are shown in the store checkout before you confirm.</Text>
-    </ScrollView>
-  );
   };
 
   const renderHome = () => {
@@ -2474,9 +2524,7 @@ export default function App() {
         ? 'Checking native alarm permissions…'
         : !alarmHealth.canRingNow
           ? 'Alarm access is incomplete. Tap to review permissions.'
-          : !alarmHealth.testAlarmPassed
-            ? 'Run the 60-second ring test to unlock alarm scheduling.'
-            : alarmHealth.batteryRestricted
+          : alarmHealth.batteryRestricted
               ? 'Battery restrictions may delay alarms on this device.'
               : null;
 
@@ -2516,7 +2564,7 @@ export default function App() {
                 onPress={() => {
                   if (!isNativeAlarmAvailable) {
                     Alert.alert('Development build required', 'Alarm testing is disabled in Expo Go. Install the Wayykup development build.');
-                  } else if (alarmHealth?.testAlarmPassed !== true && alarmHealth?.canRingNow) {
+                  } else if (alarmHealth?.canRingNow && alarmHealth.testAlarmPassed !== true) {
                     void beginAlarmTest();
                   } else if (!alarmHealth?.notifications) {
                     void requestSettingsNotifications();
@@ -2555,7 +2603,7 @@ export default function App() {
                         index={index}
                         total={alarms.length}
                         layoutScale={layoutScale}
-                        nextLabel={index === 0 ? nextAlarmCountdown(alarm, now) : repeatLabel(alarm.days)}
+                        nextLabel={nextAlarmCountdown(alarm, now)}
                         openSwipeId={openAlarmSwipeId}
                         onSwipeOpen={handleAlarmSwipeOpen}
                         onEdit={() => openEditAlarm(alarm)}
@@ -2600,6 +2648,7 @@ export default function App() {
     const minuteValues = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'));
     const closeEditor = () => {
       setLinkingQr(false);
+      setChallengePreviewing(false);
       dismissEditor();
     };
     const updateHour = (index: number) => {
@@ -2614,19 +2663,105 @@ export default function App() {
       const nextHour = index === 1 ? (hourValue % 12) + 12 : hourValue % 12;
       setDraft((current) => ({ ...current, time: `${String(nextHour).padStart(2, '0')}:${String(minuteValue).padStart(2, '0')}` }));
     };
-    const openPremium = () => {
-      setPaywallReturnScreen('editor');
-      setPlan('yearly');
-      setPaywallStage('plans');
-      setScreen('paywall');
-    };
     const selectTask = (task: Task) => {
-      if ((task === 'Shake' || task === 'QR scan') && !hasPremium) {
-        openPremium();
+      setLinkingQr(false);
+      setChallengePreviewing(false);
+      setDraft((current) => ({ ...current, task }));
+      if (task === 'Yell to Wake') {
+        Alert.alert(
+          'Microphone access for Yell to Wake',
+          'Wayykup measures sound levels only while this challenge is active. Audio stays in memory on your device and is never saved or uploaded.',
+          [
+            { text: 'Not now', style: 'cancel', onPress: () => trackEvent('challenge_permission_denied', {
+              type: 'yell',
+              mode: draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
+              duration_ms: 0,
+              attempts: 0,
+              preview: false,
+            }) },
+            { text: 'Continue', onPress: () => {
+              requestRecordingPermissionsAsync()
+                .then((permission) => {
+                  if (!permission.granted) {
+                    trackEvent('challenge_permission_denied', {
+                      type: 'yell',
+                      mode: draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
+                      duration_ms: 0,
+                      attempts: 0,
+                      preview: false,
+                    });
+                    Alert.alert('Microphone access is off', 'Yell to Wake will switch to your chosen fallback if microphone access is unavailable when the alarm rings.');
+                  }
+                })
+                .catch((error: unknown) => {
+                  console.error('Microphone permission request failed for Yell to Wake.', error);
+                  Alert.alert('Microphone unavailable', 'Wayykup could not request microphone access. Yell to Wake will use your fallback if the microphone is unavailable at alarm time.');
+                });
+            } },
+          ],
+        );
+      } else if (task === 'Face Challenge') {
+        Alert.alert(
+          'Camera access for Face Challenge',
+          'Wayykup checks gestures on-device. Camera frames are not saved or uploaded, and no face identity is recognized.',
+          [
+            { text: 'Not now', style: 'cancel', onPress: () => trackEvent('challenge_permission_denied', {
+              type: 'face',
+              mode: 'gesture_sequence',
+              duration_ms: 0,
+              attempts: 0,
+              gesture_sequence: '',
+              preview: false,
+            }) },
+            { text: 'Continue', onPress: () => {
+              requestCameraPermission()
+                .then((permission) => {
+                  if (!permission.granted) {
+                    trackEvent('challenge_permission_denied', {
+                      type: 'face',
+                      mode: 'gesture_sequence',
+                      duration_ms: 0,
+                      attempts: 0,
+                      gesture_sequence: '',
+                      preview: false,
+                    });
+                    Alert.alert('Camera access is off', 'Face Challenge will switch to your chosen fallback if camera access is unavailable when the alarm rings.');
+                  }
+                })
+                .catch((error: unknown) => {
+                  console.error('Camera permission request failed for Face Challenge.', error);
+                  Alert.alert('Camera unavailable', 'Wayykup could not request camera access. Face Challenge will use your fallback if the camera is unavailable at alarm time.');
+                });
+            } },
+          ],
+        );
+      }
+    };
+    const previewSound = async (sound: string) => {
+      if (previewingSound === sound) {
+        if (soundPreviewTimeout.current) clearTimeout(soundPreviewTimeout.current);
+        soundPreviewTimeout.current = null;
+        soundPreviewPlayer.pause();
+        setPreviewingSound(null);
         return;
       }
-      setLinkingQr(false);
-      setDraft((current) => ({ ...current, task }));
+      try {
+        if (soundPreviewTimeout.current) clearTimeout(soundPreviewTimeout.current);
+        await setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'doNotMix' });
+        soundPreviewPlayer.replace(SOUND_ASSETS[sound] ?? SOUND_ASSETS['Air raid']);
+        soundPreviewPlayer.loop = false;
+        soundPreviewPlayer.volume = 0.9;
+        soundPreviewPlayer.play();
+        setPreviewingSound(sound);
+        soundPreviewTimeout.current = setTimeout(() => {
+          soundPreviewPlayer.pause();
+          setPreviewingSound(null);
+          soundPreviewTimeout.current = null;
+        }, 3300);
+      } catch (error) {
+        console.error('Alarm sound preview could not start.', error);
+        Alert.alert('Preview unavailable', 'Wayykup could not play this alarm preview on this device.');
+      }
     };
     const chooseDeviceSong = async () => {
       if (!isNativeAlarmAvailable) {
@@ -2697,7 +2832,30 @@ export default function App() {
                   <Text style={styles.sheetChevron}>{expandedEditorSection === 'sound' ? '⌄' : '›'}</Text>
                 </TouchableOpacity>
                 {expandedEditorSection === 'sound' && <View style={styles.sheetInlineOptions}>
-                  {SOUNDS.map((sound) => <TouchableOpacity key={sound} onPress={() => setDraft((current) => ({ ...current, sound, customSoundUri: undefined, customSoundName: undefined }))} style={styles.sheetInlineOption}><Text style={[styles.sheetInlineText, draft.sound === sound && !draft.customSoundUri && styles.sheetInlineTextSelected]}>{sound}</Text>{draft.sound === sound && !draft.customSoundUri && <Text style={styles.sheetInlineCheck}>✓</Text>}</TouchableOpacity>)}
+                  {SOUNDS.map((sound) => {
+                    const selected = draft.sound === sound && !draft.customSoundUri;
+                    const previewing = previewingSound === sound;
+                    return (
+                      <View key={sound} style={styles.sheetInlineOption}>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          onPress={() => setDraft((current) => ({ ...current, sound, customSoundUri: undefined, customSoundName: undefined }))}
+                          style={{ flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: 43 }}
+                        >
+                          <Text style={[styles.sheetInlineText, selected && styles.sheetInlineTextSelected]}>{sound}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`${previewing ? 'Stop' : 'Preview'} ${sound}`}
+                          onPress={() => { void previewSound(sound); }}
+                          style={{ minWidth: 42, minHeight: 43, alignItems: 'center', justifyContent: 'center' }}
+                        >
+                          <Text style={styles.soundPreviewButton}>{previewing ? '■' : '▶'}</Text>
+                        </TouchableOpacity>
+                        {selected && <Text style={styles.sheetInlineCheck}>✓</Text>}
+                      </View>
+                    );
+                  })}
                   <TouchableOpacity accessibilityRole="button" onPress={() => { void chooseDeviceSong(); }} style={styles.sheetInlineOption}>
                     <Text style={[styles.sheetInlineText, draft.customSoundUri && styles.sheetInlineTextSelected]}>Choose from phone…</Text>
                     {draft.customSoundUri && <Text style={styles.sheetInlineCheck}>✓</Text>}
@@ -2710,17 +2868,88 @@ export default function App() {
                   <Text style={styles.sheetChevron}>{expandedEditorSection === 'task' ? '⌄' : '›'}</Text>
                 </TouchableOpacity>
                 {expandedEditorSection === 'task' && TASKS.map((task) => {
-                  const locked = !hasPremium && (task.name === 'Shake' || task.name === 'QR scan');
                   const selected = draft.task === task.name;
                   return (
-                    <TouchableOpacity key={task.name} onPress={() => (locked ? openPremium() : selectTask(task.name))} style={styles.sheetInlineOption}>
+                    <TouchableOpacity key={task.name} onPress={() => selectTask(task.name)} style={styles.sheetInlineOption}>
                       <Text style={[styles.sheetInlineText, selected && styles.sheetInlineTextSelected]}>{taskLabel(task.name, draft)}</Text>
-                      {locked ? <Text style={styles.sheetLock}>♙ Premium</Text> : selected ? <Text style={styles.sheetInlineCheck}>✓</Text> : null}
+                      {selected ? <Text style={styles.sheetInlineCheck}>✓</Text> : null}
                     </TouchableOpacity>
                   );
                 })}
                 {expandedEditorSection === 'task' && draft.task === 'Math' && <View style={styles.sheetDifficulty}>{(['Easy', 'Medium', 'Hard'] as MathDifficulty[]).map((difficulty) => <TouchableOpacity key={difficulty} onPress={() => setDraft((current) => ({ ...current, mathDifficulty: difficulty }))} style={[styles.sheetDifficultyButton, draft.mathDifficulty === difficulty && styles.sheetDifficultySelected]}><Text style={[styles.sheetDifficultyText, draft.mathDifficulty === difficulty && styles.sheetDifficultyTextSelected]}>{difficulty}</Text></TouchableOpacity>)}</View>}
                 {expandedEditorSection === 'task' && draft.task === 'Shake' && <View style={styles.sheetDifficulty}>{[50, 100, 200].map((count) => <TouchableOpacity key={count} onPress={() => setDraft((current) => ({ ...current, shakeCount: count }))} style={[styles.sheetDifficultyButton, draft.shakeCount === count && styles.sheetDifficultySelected]}><Text style={[styles.sheetDifficultyText, draft.shakeCount === count && styles.sheetDifficultyTextSelected]}>{count}</Text></TouchableOpacity>)}</View>}
+                {expandedEditorSection === 'task' && draft.task === 'Yell to Wake' && (
+                  <View style={styles.sheetDifficulty}>
+                    {(['loud', 'whisper'] as YellMode[]).map((mode) => (
+                      <TouchableOpacity
+                        key={mode}
+                        onPress={() => setDraft((current) => ({ ...current, yellMode: mode }))}
+                        style={[styles.sheetDifficultyButton, (draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode) === mode && styles.sheetDifficultySelected]}
+                      >
+                        <Text style={[styles.sheetDifficultyText, (draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode) === mode && styles.sheetDifficultyTextSelected]}>
+                          {mode.toUpperCase()}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                {expandedEditorSection === 'task' && (draft.task === 'Yell to Wake' || draft.task === 'Face Challenge') && (
+                  <View style={styles.objectPickerPanel}>
+                    <Text style={styles.qrLinkLabel}>FALLBACK IF NEEDED</Text>
+                    <Text style={styles.objectPickerHint}>Permission, device, or time limit issues switch to this challenge.</Text>
+                    <View style={styles.sheetDifficulty}>
+                      {(['Math', 'Memory'] as FallbackTask[]).map((task) => (
+                        <TouchableOpacity
+                          key={task}
+                          onPress={() => setDraft((current) => ({ ...current, fallbackTask: task }))}
+                          style={[styles.sheetDifficultyButton, (draft.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask) === task && styles.sheetDifficultySelected]}
+                        >
+                          <Text style={[styles.sheetDifficultyText, (draft.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask) === task && styles.sheetDifficultyTextSelected]}>
+                            {task}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                )}
+                {expandedEditorSection === 'task' && (draft.task === 'Yell to Wake' || draft.task === 'Face Challenge') && (
+                  <View style={styles.objectPickerPanel}>
+                    <ActionButton label={challengePreviewing ? 'STOP PREVIEW' : 'TRY IT NOW'} onPress={() => setChallengePreviewing((active) => !active)} compact />
+                    {challengePreviewing && draft.task === 'Yell to Wake' && (
+                      <YellChallenge
+                        key={`preview-${draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}`}
+                        active
+                        preview
+                        mode={draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}
+                        trackEvent={trackEvent}
+                        onComplete={() => {
+                          setChallengePreviewing(false);
+                          Alert.alert('Preview complete', 'Yell to Wake is ready to use.');
+                        }}
+                        onFallback={(reason) => {
+                          setChallengePreviewing(false);
+                          Alert.alert('Preview unavailable', `The microphone challenge could not continue (${reason}). Your alarm will use its selected fallback if needed.`);
+                        }}
+                      />
+                    )}
+                    {challengePreviewing && draft.task === 'Face Challenge' && (
+                      <FaceChallenge
+                        key="face-preview"
+                        active
+                        preview
+                        trackEvent={trackEvent}
+                        onComplete={() => {
+                          setChallengePreviewing(false);
+                          Alert.alert('Preview complete', 'Face Challenge is ready to use.');
+                        }}
+                        onFallback={(reason) => {
+                          setChallengePreviewing(false);
+                          Alert.alert('Preview unavailable', `The camera challenge could not continue (${reason}). Your alarm will use its selected fallback if needed.`);
+                        }}
+                      />
+                    )}
+                  </View>
+                )}
                 {expandedEditorSection === 'task' && draft.task === 'QR scan' && <View style={styles.qrLinkPanel}>
                   <Text style={styles.qrLinkLabel}>{draft.qrCode ? 'QR CODE LINKED' : 'LINK YOUR PHYSICAL QR CODE'}</Text>
                   {linkingQr && cameraPermission?.granted ? <><CameraView style={styles.linkCamera} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={({ data }) => { if (!data) return; setDraft((current) => ({ ...current, qrCode: data })); setLinkingQr(false); setQrError(''); }} /><TouchableOpacity onPress={() => setLinkingQr(false)}><Text style={styles.cancelScan}>CANCEL SCAN</Text></TouchableOpacity></> : <ActionButton label={draft.qrCode ? 'RE-LINK QR CODE' : 'SCAN YOUR QR CODE'} onPress={beginQrLinking} compact />}
@@ -2941,6 +3170,42 @@ export default function App() {
                 }} style={styles.memoryKey}><Text style={styles.memoryKeyText}>{digit}</Text></TouchableOpacity>)}</View>
                 {wrongAnswers > 0 && <Text style={styles.wrongAnswer}>WRONG SEQUENCE. TRY AGAIN.</Text>}
               </View>
+            )}
+            {alarmFallbackReason && (
+              <Text style={styles.simulationNote}>
+                FALLBACK ACTIVE · {alarmFallbackReason === 'alarm_audio_unavailable' && Platform.OS === 'ios'
+                  ? 'IOS ALARM AUDIO CANNOT BE MUTED SAFELY'
+                  : alarmFallbackReason.replace(/_/g, ' ').toUpperCase()}
+              </Text>
+            )}
+            {lastAlarm.task === 'Yell to Wake' && (
+              <YellChallenge
+                key={`alarm-${lastAlarm.id}-${lastAlarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}`}
+                active={screen === 'alarm'}
+                mode={lastAlarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}
+                onAlarmAudibleChange={async (audible) => {
+                  if (!activeYellAlarm.current) return;
+                  setYellAlarmAudible(audible);
+                  if (Platform.OS === 'ios' && activeOccurrenceId.current) {
+                    throw new Error('The active iOS AlarmKit sound cannot be muted by the current alarm integration.');
+                  }
+                  if (Platform.OS === 'android' && activeOccurrenceId.current) {
+                    await setAlarmAudioDucked(!audible, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
+                  }
+                }}
+                trackEvent={trackEvent}
+                onComplete={() => { void finishChallenge(); }}
+                onFallback={(reason) => switchToChallengeFallback(reason)}
+              />
+            )}
+            {lastAlarm.task === 'Face Challenge' && (
+              <FaceChallenge
+                key={`alarm-${lastAlarm.id}`}
+                active={screen === 'alarm'}
+                trackEvent={trackEvent}
+                onComplete={() => { void finishChallenge(); }}
+                onFallback={(reason) => switchToChallengeFallback(reason)}
+              />
             )}
           </View>
           {lastAlarm.savage && <TouchableOpacity onPress={snoozeAlarm} style={styles.snoozeButton}><Text style={styles.snoozeText}>SNOOZE 5 MIN · VOLUME PENALTY +{snoozeLevel + 1}</Text></TouchableOpacity>}
@@ -3260,7 +3525,7 @@ export default function App() {
             <View style={styles.settingsListIcon}><Text style={styles.settingsListIconNeutral}>▶</Text></View>
             <View style={styles.settingsListCopy}>
               <Text style={styles.settingsListLabel}>60-second ring test</Text>
-              <Text style={styles.settingsListDetail}>Complete the test challenge before scheduling your first alarm.</Text>
+              <Text style={styles.settingsListDetail}>Optional: test a native ring and wake-up challenge on this device.</Text>
             </View>
             <Text style={[styles.settingsListStatus, alarmHealth?.testAlarmPassed && styles.settingsListStatusEnabled]}>
               {alarmHealth?.testAlarmPassed ? 'Passed' : 'Run'}
@@ -3455,21 +3720,28 @@ export default function App() {
     );
   };
 
+  const visibleScreen = startupProgressLoaded
+    && !hasPremium
+    && screen !== 'welcome'
+    && screen !== 'proof'
+    && screen !== 'paywall'
+    ? 'paywall'
+    : screen;
   const screenContent = !startupProgressLoaded
     ? <View style={styles.startupLoading}><WayykupIcon size={88} /></View>
-    : screen === 'welcome'
+    : visibleScreen === 'welcome'
     ? <OnboardingFlow onComplete={completeOnboarding} trackEvent={trackEvent} reduceMotion={reduceMotion} />
-    : screen === 'proof'
+    : visibleScreen === 'proof'
       ? <SafeAreaView style={styles.safeArea}>{renderProof()}<StatusBar barStyle="dark-content" /></SafeAreaView>
-      : screen === 'paywall'
+      : visibleScreen === 'paywall'
       ? <View style={[styles.safeArea, { paddingTop: Math.max(insets.top, 12), paddingBottom: Math.max(insets.bottom, 8) }]}>{renderPaywall()}{renderPlansModal()}<StatusBar barStyle="dark-content" /></View>
-        : screen === 'home' || screen === 'editor'
+        : visibleScreen === 'home' || visibleScreen === 'editor'
           ? renderHome()
-          : screen === 'alarm'
+          : visibleScreen === 'alarm'
             ? renderAlarm()
-              : screen === 'streak'
+              : visibleScreen === 'streak'
                 ? renderStreakMoment()
-                : screen === 'stats'
+                : visibleScreen === 'stats'
                 ? renderStats()
                 : renderSettings();
   const screenTranslateY = screenEntrance.interpolate({ inputRange: [0, 1], outputRange: [12, 0] });
@@ -3528,21 +3800,16 @@ const styles = StyleSheet.create({
   proofDetail: { color: MUTED, fontSize: 11, marginTop: 4 },
   proofIndex: { color: '#ABA7A1', fontSize: 10, fontWeight: '800' },
   onboardingBottom: { marginTop: 14 },
-  paywall: { paddingHorizontal: 23, paddingTop: 16, paddingBottom: 25 },
   trialIntroScroll: { flex: 1, backgroundColor: '#F1F0F6' },
   trialIntro: { flexGrow: 1, backgroundColor: '#F1F0F6', paddingHorizontal: 24, paddingTop: 20, paddingBottom: 13, alignItems: 'center' },
   trialIntroCompact: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 },
   trialReminder: { flexGrow: 1, backgroundColor: '#F1F0F6', paddingHorizontal: 33, paddingTop: 10, paddingBottom: 13, alignItems: 'center', justifyContent: 'space-between' },
   trialReminderCompact: { paddingHorizontal: 24, paddingTop: 2, paddingBottom: 8 },
-  trialReminderBack: { alignSelf: 'flex-start', width: 40, height: 45, justifyContent: 'center' },
-  trialReminderBackGlyph: { color: '#171018', fontSize: 46, lineHeight: 50, fontWeight: '300' },
   trialReminderTitle: { width: '100%', color: '#171018', fontFamily: 'Georgia', fontWeight: '700', textAlign: 'center', marginTop: 14 },
   trialReminderArt: { flex: 1, width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 200 },
   proTrialScreen: { flexGrow: 1, backgroundColor: '#F1F0F6', paddingHorizontal: 27, paddingTop: 5, paddingBottom: 15, justifyContent: 'space-between' },
   proTrialScreenCompact: { paddingHorizontal: 20, paddingTop: 0, paddingBottom: 8 },
   proTrialHeader: { width: '100%', minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  proTrialBack: { width: 42, height: 42, justifyContent: 'center' },
-  proTrialBackGlyph: { color: '#171018', fontSize: 43, lineHeight: 47, fontWeight: '300' },
   proTrialRestore: { color: '#171018', fontSize: 13, fontWeight: '600', textDecorationLine: 'underline' },
   proTrialClose: { width: 38, height: 42, alignItems: 'flex-end', justifyContent: 'center' },
   proTrialCloseGlyph: { color: '#171018', fontSize: 32, lineHeight: 36, fontWeight: '300' },
@@ -3646,12 +3913,6 @@ const styles = StyleSheet.create({
   trialLegalText: { color: '#8E8B94', fontSize: 10, textDecorationLine: 'underline' },
   trialLegalLink: { fontWeight: '600' },
   trialError: { color: '#B3261E', fontSize: 11, textAlign: 'center', marginTop: 5 },
-  paywallTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  paywallHero: { marginTop: 29 },
-  paywallSeal: { position: 'absolute', right: 4, top: 6, width: 68, height: 68, borderRadius: 34, backgroundColor: INK, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '7deg' }] },
-  sealIcon: { color: RED, fontSize: 20, lineHeight: 21 },
-  sealLabel: { color: '#FFFFFF', fontSize: 7, lineHeight: 9, fontWeight: '900', textAlign: 'center', letterSpacing: 1 },
-  paywallTitle: { color: INK, fontSize: 40, lineHeight: 42, fontWeight: '900', letterSpacing: -1.5 },
   waterfall: { paddingHorizontal: 18, paddingTop: 12, paddingBottom: 28 },
   waterfallHero: { paddingTop: 26, paddingBottom: 18, alignItems: 'center' },
   waterfallIcon: { fontSize: 34, color: RED, marginBottom: 9, textAlign: 'center' },
@@ -3668,28 +3929,6 @@ const styles = StyleSheet.create({
   discountPrice: { color: INK, fontSize: 26, fontWeight: '900', marginTop: 4, letterSpacing: -0.8 },
   discountDetail: { color: MUTED, fontSize: 10, lineHeight: 16, marginTop: 6 },
   waterfallActions: { marginTop: 18, gap: 7 },
-  perkList: { marginTop: 19, marginBottom: 17, borderTopWidth: 1, borderColor: '#E1DFDA' },
-  perkRow: { flexDirection: 'row', alignItems: 'center', minHeight: 58, borderBottomWidth: 1, borderColor: '#E1DFDA' },
-  perkIcon: { width: 31, height: 31, borderRadius: 16, backgroundColor: '#FBE8E5', alignItems: 'center', justifyContent: 'center', marginRight: 11 },
-  perkIconText: { color: RED, fontSize: 16, fontWeight: '700' },
-  perkCopy: { flex: 1 },
-  perkTitle: { color: INK, fontSize: 12, fontWeight: '800' },
-  perkDetail: { color: MUTED, fontSize: 10, marginTop: 3 },
-  checkmark: { color: RED, fontSize: 15, fontWeight: '800', marginRight: 5 },
-  planOptions: { gap: 8, marginBottom: 15 },
-  planCard: { position: 'relative', borderWidth: 1, borderColor: '#DEDBD6', backgroundColor: '#FFFFFF', borderRadius: 5, paddingVertical: 11, paddingHorizontal: 13 },
-  planSelected: { borderWidth: 1.5, borderColor: RED, backgroundColor: '#FFFBFA' },
-  planHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 },
-  planName: { color: INK, fontSize: 9, fontWeight: '900', letterSpacing: 1.5 },
-  weeklyLabel: { color: '#8B8781', fontSize: 8, fontWeight: '800', letterSpacing: 1 },
-  planPriceLine: { flexDirection: 'row', alignItems: 'baseline' },
-  planPrice: { color: INK, fontSize: 20, fontWeight: '900', letterSpacing: -0.5 },
-  planPeriod: { color: MUTED, fontSize: 11 },
-  planSub: { color: MUTED, fontSize: 9, marginTop: 2 },
-  radio: { width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, borderColor: '#C6C1BA', alignItems: 'center', justifyContent: 'center' },
-  planCardRadio: { position: 'absolute', right: 13, top: 28 },
-  radioOn: { borderColor: RED },
-  radioDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: RED },
   terms: { color: '#96918B', fontSize: 9, textAlign: 'center', marginTop: 10 },
   restorePurchases: { alignItems: 'center', padding: 12 },
   restoreText: { color: '#807B75', fontSize: 8, fontWeight: '900', letterSpacing: 1.1 },
@@ -3862,9 +4101,9 @@ const styles = StyleSheet.create({
   sheetInlineOptions: { marginHorizontal: 12, backgroundColor: '#F7F7F9', borderBottomLeftRadius: 12, borderBottomRightRadius: 12, paddingHorizontal: 12 },
   sheetInlineOption: { minHeight: 43, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#E8E8EB' },
   sheetInlineText: { color: '#55555B', fontSize: 13 },
+  soundPreviewButton: { color: '#FF1717', fontSize: 12, fontWeight: '800' },
   sheetInlineTextSelected: { color: '#FF1717', fontWeight: '700' },
   sheetInlineCheck: { color: '#FF1717', fontSize: 17, fontWeight: '700' },
-  sheetLock: { color: '#929299', fontSize: 11, fontWeight: '600' },
   sheetDifficulty: { flexDirection: 'row', gap: 8, paddingTop: 10, paddingHorizontal: 12 },
   sheetDifficultyButton: { flex: 1, minHeight: 35, borderRadius: 9, backgroundColor: '#F1F1F3', alignItems: 'center', justifyContent: 'center' },
   sheetDifficultySelected: { backgroundColor: '#FF1717' },

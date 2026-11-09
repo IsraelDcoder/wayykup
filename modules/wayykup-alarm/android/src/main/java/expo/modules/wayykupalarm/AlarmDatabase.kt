@@ -2,12 +2,24 @@ package expo.modules.wayykupalarm
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
+import java.io.File
 import org.json.JSONObject
 
-internal class AlarmDatabase(context: Context) : SQLiteOpenHelper(context, "wayykup-stats.db", null, 1) {
-  override fun onCreate(database: SQLiteDatabase) {
+internal class AlarmDatabase(context: Context) {
+  val writableDatabase: SQLiteDatabase = openDatabase(context)
+
+  private fun openDatabase(context: Context): SQLiteDatabase {
+    val directory = File(context.filesDir, "SQLite")
+    check(directory.isDirectory || directory.mkdirs()) {
+      "Wayykup could not create the shared Stats database directory."
+    }
+    val database = SQLiteDatabase.openDatabase(
+      File(directory, "wayykup-stats.db").absolutePath,
+      null,
+      SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY,
+    )
+    database.execSQL("PRAGMA busy_timeout = 5000")
     database.execSQL(
       """CREATE TABLE IF NOT EXISTS occurrences (
         id TEXT PRIMARY KEY NOT NULL,
@@ -35,9 +47,8 @@ internal class AlarmDatabase(context: Context) : SQLiteOpenHelper(context, "wayy
     )
     database.execSQL("CREATE INDEX IF NOT EXISTS occurrences_localDate_idx ON occurrences(localDate)")
     database.execSQL("CREATE INDEX IF NOT EXISTS occurrences_scheduledAt_idx ON occurrences(scheduledAt)")
+    return database
   }
-
-  override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
 }
 
 internal object OccurrenceWriter {
@@ -51,41 +62,45 @@ internal object OccurrenceWriter {
     firstRingAt: Long,
     timeZone: String,
   ) {
-    val localDate = occurrenceId.substringAfterLast(':')
-    val challenge = challengeFor(alarm.optString("task", "Math"))
-    val soundId = alarm.optString("sound", "Air raid")
-      .lowercase()
-      .replace(Regex("[^a-z0-9]+"), "_")
-      .trim('_')
-    val db = AlarmDatabase(context).writableDatabase
-    db.beginTransaction()
     try {
-      db.execSQL(
-        """INSERT OR IGNORE INTO occurrences
-          (id, alarmId, localDate, tz, scheduledAt, status, challenge, difficulty, tierReached,
-           failedAttempts, rearms, soundId)
-          VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, 'gentle', 0, 0, ?)""",
-        arrayOf(
-          occurrenceId,
-          alarm.getString("id"),
-          localDate,
-          timeZone,
-          scheduledAt,
-          challenge,
-          difficultyFor(alarm),
-          soundId
+      val localDate = occurrenceId.substringAfterLast(':')
+      val challenge = challengeFor(alarm.optString("task", "Math"))
+      val soundId = alarm.optString("sound", "Air raid")
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "_")
+        .trim('_')
+      val db = AlarmDatabase(context).writableDatabase
+      try {
+        db.beginTransaction()
+        db.execSQL(
+          """INSERT OR IGNORE INTO occurrences
+            (id, alarmId, localDate, tz, scheduledAt, status, challenge, difficulty, tierReached,
+             failedAttempts, rearms, soundId)
+            VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, 'gentle', 0, 0, ?)""",
+          arrayOf(
+            occurrenceId,
+            alarm.getString("id"),
+            localDate,
+            timeZone,
+            scheduledAt,
+            challenge,
+            difficultyFor(alarm),
+            soundId
+          )
         )
-      )
-      db.execSQL(
-        """UPDATE occurrences SET status='ringing', firstRingAt=COALESCE(firstRingAt, ?)
-          WHERE id=? AND status IN ('scheduled','ringing')""",
-        arrayOf(firstRingAt, occurrenceId)
-      )
-      db.setTransactionSuccessful()
-      Log.i(TAG, "event=fired event=ringStarted alarmId=${alarm.optString("id")} occurrenceId=$occurrenceId at=$firstRingAt")
-    } finally {
-      db.endTransaction()
-      db.close()
+        db.execSQL(
+          """UPDATE occurrences SET status='ringing', firstRingAt=COALESCE(firstRingAt, ?)
+            WHERE id=? AND status IN ('scheduled','ringing')""",
+          arrayOf(firstRingAt, occurrenceId)
+        )
+        db.setTransactionSuccessful()
+        Log.i(TAG, "event=fired event=ringStarted alarmId=${alarm.optString("id")} occurrenceId=$occurrenceId at=$firstRingAt")
+      } finally {
+        if (db.inTransaction()) db.endTransaction()
+        db.close()
+      }
+    } catch (error: Exception) {
+      Log.e(TAG, "Could not persist alarm ring state; the challenge will repair it on completion.", error)
     }
   }
 
@@ -104,14 +119,18 @@ internal object OccurrenceWriter {
 
   fun resolve(context: Context, occurrenceId: String, status: String) {
     if (status !in setOf("bypassed", "abandoned", "completed")) return
-    val db = AlarmDatabase(context).writableDatabase
     try {
-      db.execSQL(
-        "UPDATE occurrences SET status=?, completedAt=CASE WHEN ?='completed' THEN COALESCE(completedAt, ?) ELSE completedAt END WHERE id=? AND status IN ('scheduled','ringing')",
-        arrayOf(status, status, System.currentTimeMillis(), occurrenceId)
-      )
-    } finally {
-      db.close()
+      val db = AlarmDatabase(context).writableDatabase
+      try {
+        db.execSQL(
+          "UPDATE occurrences SET status=?, completedAt=CASE WHEN ?='completed' THEN COALESCE(completedAt, ?) ELSE completedAt END WHERE id=? AND status IN ('scheduled','ringing')",
+          arrayOf(status, status, System.currentTimeMillis(), occurrenceId)
+        )
+      } finally {
+        db.close()
+      }
+    } catch (error: Exception) {
+      Log.e(TAG, "Could not resolve alarm occurrence $occurrenceId as $status.", error)
     }
   }
 
@@ -122,6 +141,8 @@ internal object OccurrenceWriter {
     "Memory" -> "memory"
     "Object Hunt" -> "object_hunt"
     "Toothbrush" -> "toothbrush"
+    "Yell to Wake" -> "yell"
+    "Face Challenge" -> "face"
     else -> "exercise"
   }
 

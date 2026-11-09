@@ -8,7 +8,12 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.wayykup.app"
+      "bundleIdentifier": "com.wayykup.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSMicrophoneUsageDescription": "Wayykup listens only for sound levels during Yell to Wake. Audio is processed in memory on your device and never saved or uploaded."
+      },
+      "buildNumber": "3"
     },
     "android": {
       "package": "com.wayykup.app",
@@ -19,13 +24,21 @@
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_MEDIA_PLAYBACK",
         "WAKE_LOCK",
-        "RECEIVE_BOOT_COMPLETED"
+        "RECEIVE_BOOT_COMPLETED",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.CAMERA"
+      ],
+      "blockedPermissions": [
+        "android.permission.ACTIVITY_RECOGNITION"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#111217",
         "foregroundImage": "./assets/icon.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "versionCode": 3
     },
     "web": {
       "favicon": "./assets/icon.png"
@@ -35,14 +48,14 @@
         "expo-audio",
         {
           "enableBackgroundPlayback": true,
-          "recordAudioAndroid": false,
-          "microphonePermission": false
+          "recordAudioAndroid": true,
+          "microphonePermission": "Wayykup measures microphone levels during Yell to Wake. It does not record, save, or upload audio."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Wayykup to use the camera for wake-up challenges.",
+          "cameraPermission": "Wayykup uses the camera for object, QR, and Face wake-up challenges. Face gestures are detected on-device; frames are never saved or uploaded.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
@@ -52,7 +65,28 @@
       "expo-background-task",
       "expo-font",
       "expo-sharing",
-      "./modules/wayykup-alarm/app.plugin.js"
-    ]
+      "./modules/wayykup-alarm/app.plugin.js",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "compileSdkVersion": 36
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "71ea7dcb-99e7-42cc-80e2-94cafcb93fe6"
+      }
+    },
+    "owner": "vabery2",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/71ea7dcb-99e7-42cc-80e2-94cafcb93fe6"
+    }
   }
 }

@@ -17,11 +17,12 @@ import expo.modules.kotlin.modules.ModuleDefinition
 
 class WayykupAlarmModule : Module() {
   private var ringReceiver: BroadcastReceiver? = null
+  private var microphoneMeter: MicrophoneMeter? = null
   private val imageLabeler by lazy { ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS) }
 
   override fun definition() = ModuleDefinition {
     Name("WayykupAlarm")
-    Events("ringStarted", "challengeCompleted", "healthChanged")
+    Events("ringStarted", "challengeCompleted", "healthChanged", "microphoneLevel", "microphoneError")
 
     OnCreate {
       val receiver = object : BroadcastReceiver() {
@@ -65,6 +66,8 @@ class WayykupAlarmModule : Module() {
     }
 
     OnDestroy {
+      microphoneMeter?.stop()
+      microphoneMeter = null
       ringReceiver?.let { receiver ->
         try {
           appContext.reactContext?.unregisterReceiver(receiver)
@@ -161,7 +164,6 @@ class WayykupAlarmModule : Module() {
       AlarmHealth.get(context())
     }
     AsyncFunction("requestPermissions") {
-      AlarmHealth.openPermissionSettings(context())
       AlarmHealth.get(context())
     }
     AsyncFunction("openSettings") { kind: String ->
@@ -175,6 +177,26 @@ class WayykupAlarmModule : Module() {
     }
     AsyncFunction("startTestAlarm") {
       AlarmScheduler.scheduleTest(context())
+    }
+    AsyncFunction("startMicrophoneMeter") {
+      val meter = microphoneMeter ?: MicrophoneMeter(
+        context(),
+        { dbfs -> sendEvent("microphoneLevel", mapOf("dbfs" to dbfs)) },
+        { sendEvent("microphoneError", mapOf("reason" to "resource_unavailable")) }
+      ).also { microphoneMeter = it }
+      meter.start()
+    }
+    AsyncFunction("stopMicrophoneMeter") {
+      microphoneMeter?.stop()
+      microphoneMeter = null
+    }
+    AsyncFunction("setAlarmAudioDucked") { ducked: Boolean, fadeDurationMs: Double ->
+      context().startService(
+        Intent(context(), RingService::class.java)
+          .setAction(RingService.ACTION_SET_AUDIO_DUCKED)
+          .putExtra(RingService.EXTRA_AUDIO_DUCKED, ducked)
+          .putExtra(RingService.EXTRA_AUDIO_FADE_DURATION_MS, fadeDurationMs.toLong())
+      )
     }
   }
 

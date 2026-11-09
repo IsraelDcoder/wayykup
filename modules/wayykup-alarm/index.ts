@@ -19,6 +19,7 @@ export type AlarmHealth = {
   fullScreenIntent: boolean;
   notifications: boolean;
   batteryRestricted: boolean;
+  canSchedule: boolean;
   canRingNow: boolean;
   testAlarmPassed: boolean;
   platform: 'android' | 'ios' | 'unsupported';
@@ -42,6 +43,14 @@ export type ObjectPrediction = {
   confidence: number;
 };
 
+export type MicrophoneLevelEvent = {
+  dbfs: number;
+};
+
+export type MicrophoneErrorEvent = {
+  reason: string;
+};
+
 type NativeAlarmModule = {
   classifyImage(uri: string): Promise<ObjectPrediction[]>;
   importSound(uri: string, name: string): Promise<{ uri: string; name: string; displayName: string }>;
@@ -53,9 +62,12 @@ type NativeAlarmModule = {
   requestPermissions(): Promise<AlarmHealth>;
   openSettings(kind: 'exactAlarm' | 'fullScreenIntent' | 'battery' | 'app'): Promise<void>;
   startTestAlarm(): Promise<void>;
+  startMicrophoneMeter(): Promise<void>;
+  stopMicrophoneMeter(): Promise<void>;
+  setAlarmAudioDucked(ducked: boolean, fadeDurationMs: number): Promise<void>;
   addListener(
-    eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged',
-    listener: (event: RingStartedEvent | AlarmHealth) => void,
+    eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged' | 'microphoneLevel' | 'microphoneError',
+    listener: (event: RingStartedEvent | AlarmHealth | MicrophoneLevelEvent | MicrophoneErrorEvent) => void,
   ): { remove(): void };
   getPendingChallenge(): Promise<RingStartedEvent | null>;
   consumePendingChallenge(): Promise<void>;
@@ -88,10 +100,14 @@ export const openSettings = (kind: 'exactAlarm' | 'fullScreenIntent' | 'battery'
 export const getPendingChallenge = () => requireModule().getPendingChallenge();
 export const consumePendingChallenge = () => requireModule().consumePendingChallenge();
 export const startTestAlarm = () => requireModule().startTestAlarm();
+export const startMicrophoneMeter = () => requireModule().startMicrophoneMeter();
+export const stopMicrophoneMeter = () => nativeModule?.stopMicrophoneMeter() ?? Promise.resolve();
+export const setAlarmAudioDucked = (ducked: boolean, fadeDurationMs: number) =>
+  nativeModule?.setAlarmAudioDucked(ducked, fadeDurationMs) ?? Promise.resolve();
 
 export function addAlarmListener(
-  eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged',
-  listener: (event: RingStartedEvent | AlarmHealth) => void,
+  eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged' | 'microphoneLevel' | 'microphoneError',
+  listener: (event: RingStartedEvent | AlarmHealth | MicrophoneLevelEvent | MicrophoneErrorEvent) => void,
 ) {
   if (!nativeModule) return { remove() {} };
   return nativeModule.addListener(eventName, listener);

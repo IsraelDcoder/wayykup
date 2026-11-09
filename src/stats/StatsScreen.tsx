@@ -66,6 +66,34 @@ function resultColor(result: DayResult) {
   }
 }
 
+function challengeLabel(challenge: Occurrence['challenge']): string {
+  switch (challenge) {
+    case 'math': return 'Math';
+    case 'shake': return 'Shake';
+    case 'qr': return 'QR scan';
+    case 'memory': return 'Memory';
+    case 'object_hunt': return 'Object Hunt';
+    case 'toothbrush': return 'Toothbrush';
+    case 'push_ups': return 'Push-ups';
+    case 'squats': return 'Squats';
+    case 'exercise': return 'Exercise';
+    case 'yell': return 'Yell to Wake';
+    case 'face': return 'Face Challenge';
+  }
+}
+
+function challengeStatusLabel(status: Occurrence['status']): string {
+  switch (status) {
+    case 'scheduled': return 'Scheduled';
+    case 'ringing': return 'In progress';
+    case 'completed': return 'Completed';
+    case 'bypassed': return 'Bypassed';
+    case 'abandoned': return 'Abandoned';
+    case 'missed': return 'Missed';
+    case 'skipped': return 'Skipped';
+  }
+}
+
 function Delta({ children, positive }: { children: string; positive: boolean }) {
   return <Text style={[styles.delta, { color: positive ? theme.color.highlightText : theme.color.muted }]}>{children}</Text>;
 }
@@ -182,6 +210,13 @@ export function StatsScreen({
   const personalBests = useMemo(() => derivePersonalBests(occurrences, usedFreezeDates), [occurrences, usedFreezeDates]);
   const insights = useMemo(() => deriveInsights(occurrences, now), [now, occurrences]);
   const completedCount = occurrences.filter((item) => item.status === 'completed').length;
+  const challengeHistory = useMemo(
+    () => occurrences
+      .filter((item) => item.status !== 'skipped')
+      .slice()
+      .sort((a, b) => b.scheduledAt - a.scheduledAt),
+    [occurrences],
+  );
   const freezeCount = freezes.filter((freeze) => freeze.usedAt === null).length;
   const pendingFreeze = occurrences
     .filter((item) => ['missed', 'bypassed', 'abandoned'].includes(item.status)
@@ -330,7 +365,7 @@ export function StatsScreen({
         </View>
       )}
 
-      {hasAlarms && (
+      {(hasAlarms || challengeHistory.length > 0) && (
         <>
           <View style={styles.statGrid} accessibilityLabel="Wake-up averages and success for the selected period">
             <StatCard
@@ -413,6 +448,35 @@ export function StatsScreen({
             <BestRow title="Fastest wake-up" value={formatDuration(personalBests.fastestWake ? (personalBests.fastestWake.completedAt ?? 0) - (personalBests.fastestWake.firstRingAt ?? personalBests.fastestWake.completedAt ?? 0) : null)} />
             <BestRow title="Longest streak" value={`${personalBests.longestStreak} days`} />
             <BestRow title="Hardest sound beaten" value={personalBests.hardestSound?.soundId.replaceAll('_', ' ') ?? '—'} detail={personalBests.hardestSound ? `${personalBests.hardestSound.tierReached} · ${personalBests.hardestSound.rearms} re-arms` : undefined} />
+          </View>
+
+          <View style={styles.card} accessibilityLabel="Challenge history">
+            <Text style={styles.sectionTitle}>Challenge history</Text>
+            {challengeHistory.length ? challengeHistory.map((occurrence) => (
+              <View key={occurrence.id} style={styles.challengeRow} accessibilityLabel={`${challengeLabel(occurrence.challenge)}, ${challengeStatusLabel(occurrence.status)}, ${new Date(occurrence.scheduledAt).toLocaleString()}`}>
+                <View style={styles.challengeCopy}>
+                  <Text style={styles.challengeTitle}>{challengeLabel(occurrence.challenge)}</Text>
+                  <Text style={styles.statNote}>
+                    {new Date(occurrence.scheduledAt).toLocaleString([], {
+                      weekday: 'short',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    })}
+                  </Text>
+                </View>
+                <Text style={[
+                  styles.challengeStatus,
+                  occurrence.status === 'completed' && styles.challengeStatusCompleted,
+                  ['missed', 'bypassed', 'abandoned'].includes(occurrence.status) && styles.challengeStatusUnresolved,
+                ]}>
+                  {challengeStatusLabel(occurrence.status)}
+                </Text>
+              </View>
+            )) : (
+              <Text style={styles.bodyText}>Your scheduled and completed wake-up challenges will appear here.</Text>
+            )}
           </View>
 
           {insights.length > 0 && (
@@ -506,6 +570,12 @@ const styles = StyleSheet.create({
   bestCopy: { flex: 1, gap: 3 },
   bestTitle: { color: theme.color.muted, fontFamily: theme.font.medium, fontSize: 13 },
   bestValue: { color: theme.color.text, fontFamily: theme.font.number, fontSize: 15, textAlign: 'right', textTransform: 'capitalize' },
+  challengeRow: { minHeight: 54, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.color.divider, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingVertical: 9 },
+  challengeCopy: { flex: 1, gap: 3 },
+  challengeTitle: { color: theme.color.text, fontFamily: theme.font.strong, fontSize: 14 },
+  challengeStatus: { color: theme.color.muted, fontFamily: theme.font.strong, fontSize: 11 },
+  challengeStatusCompleted: { color: theme.color.accent },
+  challengeStatusUnresolved: { color: theme.color.bypass },
   insight: { color: theme.color.text, fontFamily: theme.font.medium, fontSize: 14, lineHeight: 21, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.color.divider },
   freezeBanner: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12, padding: 16, borderRadius: 16, backgroundColor: theme.color.accentSurface },
   freezeCopy: { flex: 1, minWidth: 160, gap: 3 },

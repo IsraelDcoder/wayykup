@@ -21,8 +21,6 @@ import * as Haptics from 'expo-haptics';
 import Svg, { Circle, ClipPath, Defs, Ellipse, G, Path } from 'react-native-svg';
 import {
   getAlarmHealth,
-  getBatteryRestrictionGuidance,
-  openAlarmSettings,
   persistKeepAlarmPlayingPreference,
   requestAlarmNotifications,
   type AlarmRecord,
@@ -805,7 +803,6 @@ export function OnboardingFlow({
   const [notificationGranted, setNotificationGranted] = useState(false);
   const [notificationDenied, setNotificationDenied] = useState(false);
   const [notificationPermissionMessage, setNotificationPermissionMessage] = useState('');
-  const [notificationGuideShown, setNotificationGuideShown] = useState(false);
   const [cameraDenied, setCameraDenied] = useState(false);
   const [linkingQr, setLinkingQr] = useState(false);
   const [qrCode, setQrCode] = useState('');
@@ -1147,26 +1144,11 @@ export function OnboardingFlow({
         setNotificationDenied(true);
         return;
       }
-      if (!health.exactAlarm) {
-        void openAlarmSettings('exactAlarm');
-        setNotificationPermissionMessage('Allow exact alarms in system settings, then return here and tap Continue setup.');
-        setNotificationDenied(true);
-        return;
-      }
-      if (health.platform === 'android' && !health.fullScreenIntent) {
-        void openAlarmSettings('fullScreenIntent');
-        setNotificationPermissionMessage('Allow full-screen alarm notifications in system settings, then return here and tap Continue setup.');
-        setNotificationDenied(true);
-        return;
-      }
-      setNotificationGranted(health.canRingNow);
-      trackEvent('onboarding_notification_permission', { granted: health.canRingNow });
-      if (health.platform === 'android' && health.batteryRestricted && !notificationGuideShown) {
-        setNotificationPermissionMessage(getBatteryRestrictionGuidance(health.deviceModel));
-        setNotificationDenied(true);
-        setNotificationGuideShown(true);
-        return;
-      }
+      setNotificationGranted(true);
+      trackEvent('onboarding_notification_permission', {
+        granted: true,
+        alarm_ready: health.canRingNow,
+      });
       setNotificationDenied(false);
       goTo('challenge');
     } catch (error) {
@@ -1742,11 +1724,8 @@ export function OnboardingFlow({
                 <Text style={styles.warningText}>
                   {notificationPermissionMessage || 'Alarm permissions are incomplete. Review them in Settings, then return and try again.'}
                 </Text>
-                <TouchableOpacity onPress={() => {
-                  if (notificationGuideShown) void openAlarmSettings('battery');
-                  else void Linking.openSettings();
-                }}>
-                  <Text style={styles.settingsLink}>{notificationGuideShown ? 'OPEN BATTERY SETTINGS' : 'OPEN SETTINGS'}</Text>
+                <TouchableOpacity onPress={() => { void Linking.openSettings(); }}>
+                  <Text style={styles.settingsLink}>OPEN SETTINGS</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -2163,7 +2142,7 @@ export function OnboardingFlow({
               {step === 'welcome' ? 'Get started'
                 : step === 'setup' ? 'Build my alarm'
                   : step === 'time' ? 'Set my alarm'
-                    : step === 'notifications' ? notificationGuideShown && notificationGranted ? 'Continue setup' : 'Allow notifications'
+                    : step === 'notifications' ? notificationGranted ? 'Continue setup' : 'Allow notifications'
                       : step === 'sound' ? 'Continue'
                         : step === 'challenge' ? 'Continue'
                           : step === 'homeItems' ? 'Continue'

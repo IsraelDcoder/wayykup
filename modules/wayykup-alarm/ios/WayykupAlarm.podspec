@@ -7,6 +7,7 @@ Pod::Spec.new do |s|
   s.version        = package['version']
   s.summary        = 'Native OS-owned alarm scheduling and ringing for Wayykup.'
   s.description    = s.summary
+  s.homepage       = 'https://github.com/IsraelDcoder/wayykup'
   s.license        = { :type => 'UNLICENSED' }
   s.author         = 'Wayykup'
   s.platforms      = { :ios => '15.0' }

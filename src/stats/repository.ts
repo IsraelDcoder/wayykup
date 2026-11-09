@@ -95,6 +95,10 @@ function challengeForTask(task: string): OccurrenceInput['challenge'] {
   if (task === 'Memory') return 'memory';
   if (task === 'Object Hunt') return 'object_hunt';
   if (task === 'Toothbrush') return 'toothbrush';
+  if (task === 'Push-ups') return 'push_ups';
+  if (task === 'Squats') return 'squats';
+  if (task === 'Yell to Wake') return 'yell';
+  if (task === 'Face Challenge') return 'face';
   return 'exercise';
 }
 
@@ -111,7 +115,7 @@ function formatLocalDate(date: Date): string {
   return localDateKey(date);
 }
 
-function makeOccurrence(alarm: AlarmSchedule, date: Date, tz: string): OccurrenceInput {
+export function makeOccurrence(alarm: AlarmSchedule, date: Date, tz: string): OccurrenceInput {
   const [hour, minute] = alarm.time.split(':').map(Number);
   const scheduledDate = new Date(date);
   scheduledDate.setHours(hour, minute, 0, 0);
@@ -252,22 +256,47 @@ export async function completeOccurrence(
   occurrenceId: string,
   completedAt: number,
   details: { shakesCounted?: number; steps?: number; mathCorrect?: number; mathAttempts?: number; challengeDurationMs?: number },
+  fallbackOccurrence: OccurrenceInput,
+  firstRingAt: number,
 ): Promise<void> {
   const database = await getStatsDatabase();
-  await database.runAsync(
-    `UPDATE occurrences SET status = 'completed', completedAt = ?, shakesCounted = ?,
-       steps = ?, mathCorrect = ?, mathAttempts = ?, challengeDurationMs = ?,
-       tierReached = CASE WHEN failedAttempts + rearms >= 3 THEN 'brutal'
-         WHEN failedAttempts + rearms > 0 THEN 'standard' ELSE 'gentle' END
-     WHERE id = ? AND status = 'ringing'`,
-    completedAt,
-    details.shakesCounted ?? null,
-    details.steps ?? null,
-    details.mathCorrect ?? null,
-    details.mathAttempts ?? null,
-    details.challengeDurationMs ?? null,
-    occurrenceId,
-  );
+  await withSerializedTransaction(database, async () => {
+    await database.runAsync(
+      `INSERT INTO occurrences
+        (id, alarmId, localDate, tz, scheduledAt, firstRingAt, completedAt, status, challenge,
+         difficulty, tierReached, failedAttempts, rearms, soundId, shakesCounted, steps,
+         mathCorrect, mathAttempts, challengeDurationMs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 'gentle', 0, 0, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(alarmId, localDate) DO UPDATE SET
+         id = excluded.id, tz = excluded.tz, scheduledAt = excluded.scheduledAt,
+         firstRingAt = COALESCE(occurrences.firstRingAt, excluded.firstRingAt),
+         completedAt = excluded.completedAt, status = 'completed',
+         challenge = excluded.challenge, difficulty = excluded.difficulty,
+         tierReached = CASE WHEN occurrences.failedAttempts + occurrences.rearms >= 3 THEN 'brutal'
+           WHEN occurrences.failedAttempts + occurrences.rearms > 0 THEN 'standard' ELSE 'gentle' END,
+         soundId = excluded.soundId, shakesCounted = excluded.shakesCounted, steps = excluded.steps,
+         mathCorrect = excluded.mathCorrect, mathAttempts = excluded.mathAttempts,
+         challengeDurationMs = excluded.challengeDurationMs`,
+      fallbackOccurrence.id,
+      fallbackOccurrence.alarmId,
+      fallbackOccurrence.localDate,
+      fallbackOccurrence.tz,
+      fallbackOccurrence.scheduledAt,
+      firstRingAt,
+      completedAt,
+      fallbackOccurrence.challenge,
+      fallbackOccurrence.difficulty,
+      fallbackOccurrence.soundId,
+      details.shakesCounted ?? null,
+      details.steps ?? null,
+      details.mathCorrect ?? null,
+      details.mathAttempts ?? null,
+      details.challengeDurationMs ?? null,
+    );
+    if (fallbackOccurrence.id !== occurrenceId) {
+      throw new Error('The completed wake-up did not match its scheduled occurrence.');
+    }
+  });
 }
 
 export async function resolveOccurrence(

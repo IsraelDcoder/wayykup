@@ -4,6 +4,7 @@ import SQLite3
 import UIKit
 import UserNotifications
 import Vision
+import AVFoundation
 
 #if canImport(AlarmKit)
 import AlarmKit
@@ -12,9 +13,11 @@ import SwiftUI
 #endif
 
 public final class WayykupAlarmModule: Module {
+  private let microphoneMeter = MicrophoneMeter()
+
   public func definition() -> ModuleDefinition {
     Name("WayykupAlarm")
-    Events("ringStarted", "challengeCompleted", "healthChanged")
+    Events("ringStarted", "challengeCompleted", "healthChanged", "microphoneLevel", "microphoneError")
 
     AsyncFunction("schedule") { (alarm: [String: Any]) async throws in
       try await NativeAlarmScheduler.schedule(alarm)
@@ -106,6 +109,84 @@ public final class WayykupAlarmModule: Module {
     AsyncFunction("startTestAlarm") async throws {
       try await NativeAlarmScheduler.scheduleTest()
     }
+
+    AsyncFunction("startMicrophoneMeter") throws {
+      try self.microphoneMeter.start { dbfs in
+        self.sendEvent("microphoneLevel", ["dbfs": dbfs])
+      }
+    }
+
+    AsyncFunction("stopMicrophoneMeter") {
+      self.microphoneMeter.stop()
+    }
+
+    AsyncFunction("setAlarmAudioDucked") { (_: Bool, _: Double) throws in
+      throw NSError(domain: "WayykupAlarmAudio", code: 1, userInfo: [
+        NSLocalizedDescriptionKey: "iOS AlarmKit does not expose runtime alarm volume control."
+      ])
+    }
+
+    OnDestroy {
+      self.microphoneMeter.stop()
+    }
+  }
+}
+
+private final class MicrophoneMeter {
+  private let engine = AVAudioEngine()
+  private var isRunning = false
+
+  func start(onLevel: @escaping (Double) -> Void) throws {
+    guard !isRunning else { return }
+    let session = AVAudioSession.sharedInstance()
+    let input = engine.inputNode
+    var tapInstalled = false
+    do {
+      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+      try session.setActive(true, options: .notifyOthersOnDeactivation)
+      guard let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) else {
+        throw NSError(domain: "WayykupMicrophoneMeter", code: 2, userInfo: [
+          NSLocalizedDescriptionKey: "The built-in microphone is unavailable."
+        ])
+      }
+      try session.setPreferredInput(builtInMic)
+      let format = input.outputFormat(forBus: 0)
+      guard format.channelCount > 0 else {
+        throw NSError(domain: "WayykupMicrophoneMeter", code: 1, userInfo: [
+          NSLocalizedDescriptionKey: "The built-in microphone is unavailable."
+        ])
+      }
+      input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        guard let channel = buffer.floatChannelData?.pointee else { return }
+        let count = Int(buffer.frameLength)
+        guard count > 0 else { return }
+        var sumSquares = 0.0
+        for index in 0..<count {
+          let value = Double(channel[index])
+          sumSquares += value * value
+        }
+        let rms = sqrt(sumSquares / Double(count))
+        let dbfs = rms <= 0.00001 ? -100.0 : max(-100.0, 20.0 * log10(rms))
+        onLevel(dbfs)
+      }
+      tapInstalled = true
+      engine.prepare()
+      try engine.start()
+      isRunning = true
+    } catch {
+      if tapInstalled { input.removeTap(onBus: 0) }
+      engine.stop()
+      try? session.setActive(false, options: .notifyOthersOnDeactivation)
+      throw error
+    }
+  }
+
+  func stop() {
+    guard isRunning else { return }
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
+    isRunning = false
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 }
 
@@ -129,7 +210,7 @@ private enum NativeAlarmScheduler {
       throw NativeAlarmError.invalidAlarm("Alarm id is required.")
     }
     let currentHealth = await health()
-    guard currentHealth["canRingNow"] as? Bool == true else {
+    guard currentHealth["canSchedule"] as? Bool == true else {
       throw NativeAlarmError.permissionDenied
     }
     prefs.set(alarm, forKey: "\(alarmsKey).\(alarmId)")
@@ -228,7 +309,8 @@ private enum NativeAlarmScheduler {
         "fullScreenIntent": authorized,
         "notifications": notificationAllowed,
         "batteryRestricted": false,
-        "canRingNow": authorized && notificationAllowed,
+        "canSchedule": authorized,
+        "canRingNow": authorized,
         "platform": "ios",
         "deviceModel": deviceModel,
         "osVersion": "iOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
@@ -243,6 +325,7 @@ private enum NativeAlarmScheduler {
       "fullScreenIntent": false,
       "notifications": notificationAllowed,
       "batteryRestricted": false,
+      "canSchedule": notificationAllowed,
       "canRingNow": notificationAllowed,
       "platform": "ios",
       "deviceModel": deviceModel,
@@ -270,7 +353,7 @@ private enum NativeAlarmScheduler {
 
   static func scheduleTest() async throws {
     let currentHealth = await health()
-    guard currentHealth["canRingNow"] as? Bool == true else {
+    guard currentHealth["canSchedule"] as? Bool == true else {
       throw NativeAlarmError.permissionDenied
     }
     prefs.set(false, forKey: testPassedKey)
@@ -574,6 +657,10 @@ private enum NativeAlarmScheduler {
     let key = sound.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: "_", options: .regularExpression)
       .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
     let names = [
+      "dread_siren": "dread-siren.wav",
+      "panic_engine": "panic-engine.wav",
+      "nightmare": "nightmare.wav",
+      "final_warning": "final-warning.wav",
       "air_raid": "alarm-tone.wav",
       "beacon": "beacon.wav",
       "buzz_saw": "buzz-saw.wav",
@@ -804,6 +891,8 @@ private enum NativeOccurrenceStore {
     case "Memory": "memory"
     case "Object Hunt": "object_hunt"
     case "Toothbrush": "toothbrush"
+    case "Yell to Wake": "yell"
+    case "Face Challenge": "face"
     default: "exercise"
     }
   }

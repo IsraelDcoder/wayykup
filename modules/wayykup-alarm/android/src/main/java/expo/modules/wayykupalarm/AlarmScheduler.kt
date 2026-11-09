@@ -26,8 +26,8 @@ internal object AlarmScheduler {
       cancel(context, alarmId, removeDefinition = true)
       return
     }
-    if (AlarmHealth.get(context)["canRingNow"] != true) {
-      throw SecurityException("Enable notifications, exact alarms, and full-screen notifications before scheduling this alarm.")
+    if (AlarmHealth.get(context)["canSchedule"] != true) {
+      throw SecurityException("Allow Wayykup to schedule exact alarms before scheduling this alarm.")
     }
     AlarmStore.saveAlarm(context, alarm)
     cancelBase(context, alarmId)
@@ -79,8 +79,8 @@ internal object AlarmScheduler {
 
   fun scheduleTest(context: Context) {
     val health = AlarmHealth.get(context)
-    if (health["canRingNow"] != true) {
-      throw SecurityException("Enable notifications, exact alarms, and full-screen notifications before running the ring test.")
+    if (health["canSchedule"] != true) {
+      throw SecurityException("Allow Wayykup to schedule exact alarms before running the ring test.")
     }
     AlarmStore.resetTestAlarm(context)
     AlarmStore.readAlarms(context)
@@ -100,6 +100,10 @@ internal object AlarmScheduler {
       .put("testAlarm", true)
     AlarmStore.saveAlarm(context, alarm)
     scheduleAt(context, alarm, at)
+    Log.i(
+      TAG,
+      "event=test_alarm_scheduled alarmId=${alarm.optString("id")} fireAt=$at delayMs=${at - System.currentTimeMillis()} device=${Build.MANUFACTURER}/${Build.MODEL} android=${Build.VERSION.RELEASE}"
+    )
   }
 
   fun scheduleNext(context: Context, alarm: JSONObject, after: Long) {

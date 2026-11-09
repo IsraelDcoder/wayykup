@@ -7,7 +7,7 @@ export type OccurrenceStatus =
   | 'missed'
   | 'skipped';
 
-export type ChallengeType = 'math' | 'shake' | 'qr' | 'memory' | 'object_hunt' | 'toothbrush' | 'exercise';
+export type ChallengeType = 'math' | 'shake' | 'qr' | 'memory' | 'object_hunt' | 'toothbrush' | 'push_ups' | 'squats' | 'exercise' | 'yell' | 'face';
 export type WakeTier = 'gentle' | 'standard' | 'brutal';
 export type StatsPeriod = 'week' | 'month' | 'all';
 
