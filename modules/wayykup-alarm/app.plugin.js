@@ -111,12 +111,17 @@ function withWayykupPodTargets(config) {
       'm',
     );
     const widgetPodLine = /^[\t ]*pod\s+['"]WayykupAlarm['"],\s*:path\s*=>\s*['"]\.\.\/modules\/wayykup-alarm\/ios['"]\s*\r?\n?/gm;
+    const widgetAutolinkingOverride =
+      '@current_target_definition.autolinking_manager = Class.new { def should_generate_modules_provider?; false; end }.new';
     // RevenueCat 11.0.1 pins this version, which is not available from CocoaPods trunk.
     const revenueCatPod = "pod 'PurchasesHybridCommon', :git => 'https://github.com/RevenueCat/purchases-hybrid-common.git', :tag => '20.4.0'";
     let contents = mod.modResults.contents.replace(legacyWidgetTarget, '');
-    contents = contents.replace(widgetTargetBlock, (match, opening, body, closing) =>
-      `${opening}${body.replace(widgetPodLine, '')}${closing}`,
-    );
+    contents = contents.replace(widgetTargetBlock, (match, opening, body, closing) => {
+      const cleanBody = body.replace(widgetPodLine, '');
+      const indent = opening.match(/^[\t ]*/)?.[0] ?? '';
+      const override = `${indent}  ${widgetAutolinkingOverride}\n`;
+      return `${opening}${cleanBody.includes('should_generate_modules_provider?') ? cleanBody : `${cleanBody}${override}`}${closing}`;
+    });
     const targetMatch = targetOpening.exec(contents);
     if (!targetMatch) {
       throw new Error(`Wayykup could not find the ${targetName} target in its iOS Podfile.`);
@@ -131,6 +136,7 @@ function withWayykupPodTargets(config) {
       additions.push([
         `${indent}  target '${WIDGET_TARGET}' do`,
         `${indent}    inherit! :search_paths`,
+        `${indent}    ${widgetAutolinkingOverride}`,
         `${indent}  end`,
       ].join('\n'));
     }
