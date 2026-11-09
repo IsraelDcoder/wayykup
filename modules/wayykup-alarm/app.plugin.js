@@ -5,6 +5,7 @@ const {
   withAndroidManifest,
   withDangerousMod,
   withInfoPlist,
+  withPodfile,
   withXcodeProject,
 } = require('@expo/config-plugins');
 
@@ -48,6 +49,25 @@ function withAndroidAlarmActivity(config) {
     mainActivity.$['android:showWhenLocked'] = 'true';
     mainActivity.$['android:turnScreenOn'] = 'true';
     mainActivity.$['android:excludeFromRecents'] = 'false';
+    return mod;
+  });
+}
+
+function withRevenueCatHybridCommon(config) {
+  return withPodfile(config, (mod) => {
+    const targetName = mod.ios?.name ?? 'Wayykup';
+    const escapedTargetName = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const targetOpening = new RegExp(`(^[\\t ]*target\\s+['"]${escapedTargetName}['"]\\s+do\\s*$)`, 'm');
+    // RevenueCat 11.0.1 pins this version, which is not available from CocoaPods trunk.
+    const podDeclaration = "  pod 'PurchasesHybridCommon', :git => 'https://github.com/RevenueCat/purchases-hybrid-common.git', :tag => '20.4.0'";
+    const contents = mod.modResults.contents;
+
+    if (contents.includes("pod 'PurchasesHybridCommon'")) return mod;
+    if (!targetOpening.test(contents)) {
+      throw new Error(`Wayykup could not find the ${targetName} target in its iOS Podfile.`);
+    }
+
+    mod.modResults.contents = contents.replace(targetOpening, `$1\n${podDeclaration}`);
     return mod;
   });
 }
@@ -146,5 +166,6 @@ function withAlarmKitWidget(config) {
 module.exports = function withWayykupAlarm(config) {
   config = withAlarmKitInfo(config);
   config = withAndroidAlarmActivity(config);
+  config = withRevenueCatHybridCommon(config);
   return withAlarmKitWidget(config);
 };

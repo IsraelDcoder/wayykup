@@ -13,7 +13,7 @@
         "ITSAppUsesNonExemptEncryption": false,
         "NSMicrophoneUsageDescription": "Wayykup listens only for sound levels during Yell to Wake. Audio is processed in memory on your device and never saved or uploaded."
       },
-      "buildNumber": "3"
+      "buildNumber": "4"
     },
     "android": {
       "package": "com.wayykup.app",
@@ -38,7 +38,7 @@
         "foregroundImage": "./assets/icon.png"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 3
+      "versionCode": 4
     },
     "web": {
       "favicon": "./assets/icon.png"
@@ -71,7 +71,7 @@
         {
           "android": {
             "minSdkVersion": 26,
-            "compileSdkVersion": 36
+            "compileSdkVersion": 37
           }
         }
       ]
