@@ -138,6 +138,61 @@ function withAlarmKitWidget(config) {
       project.addBuildPhase([], 'PBXFrameworksBuildPhase', 'Frameworks', added.uuid);
     }
     const targetUuid = target[0];
+    const widgetNativeTarget = target[1];
+    const appTargetEntry = Object.entries(project.pbxNativeTargetSection())
+      .find(([, value]) => value.productType?.replaceAll('"', '') === 'com.apple.product-type.application');
+    if (!appTargetEntry) throw new Error('Wayykup could not find the iOS app target to host its alarm widget.');
+    const [appTargetUuid, appNativeTarget] = appTargetEntry;
+    const projectObjects = project.hash.project.objects;
+    projectObjects.PBXTargetDependency ??= {};
+    projectObjects.PBXContainerItemProxy ??= {};
+    const targetDependencies = projectObjects.PBXTargetDependency;
+    const hasWidgetDependency = (appNativeTarget.dependencies ?? []).some(({ value }) =>
+      targetDependencies[value]?.target === targetUuid,
+    );
+    if (!hasWidgetDependency) {
+      project.addTargetDependency(appTargetUuid, [targetUuid]);
+      const dependencyAdded = (appNativeTarget.dependencies ?? []).some(({ value }) =>
+        targetDependencies[value]?.target === targetUuid,
+      );
+      if (!dependencyAdded) throw new Error('Wayykup could not link the alarm widget to its host app target.');
+    }
+
+    const buildFiles = project.pbxBuildFileSection();
+    const fileReferences = project.pbxFileReferenceSection();
+    let copyPhases = project.hash.project.objects.PBXCopyFilesBuildPhase ?? {};
+    const embeddedWidget = (appNativeTarget.buildPhases ?? []).some(({ value }) => {
+      const phase = copyPhases[value];
+      return phase?.dstSubfolderSpec === 13 && (phase.files ?? []).some(({ value: buildFileUuid }) =>
+        buildFiles[buildFileUuid]?.fileRef === widgetNativeTarget.productReference,
+      );
+    });
+    if (!embeddedWidget) {
+      let embedPhase = (appNativeTarget.buildPhases ?? [])
+        .map(({ value }) => copyPhases[value])
+        .find((phase) => phase?.dstSubfolderSpec === 13);
+      if (!embedPhase) {
+        project.addBuildPhase([], 'PBXCopyFilesBuildPhase', 'Embed App Extensions', appTargetUuid, 'app_extension');
+        copyPhases = project.hash.project.objects.PBXCopyFilesBuildPhase ?? {};
+        embedPhase = (appNativeTarget.buildPhases ?? [])
+          .map(({ value }) => copyPhases[value])
+          .find((phase) => phase?.dstSubfolderSpec === 13);
+      }
+      if (!embedPhase) throw new Error('Wayykup could not create the alarm widget embedding build phase.');
+
+      const productReference = fileReferences[widgetNativeTarget.productReference];
+      if (!productReference) throw new Error('Wayykup could not find the alarm widget product in the Xcode project.');
+      const productName = productReference.name?.replaceAll('"', '') ?? `${WIDGET_TARGET}.appex`;
+      const buildFile = {
+        uuid: project.generateUuid(),
+        fileRef: widgetNativeTarget.productReference,
+        basename: productName,
+        group: 'Embed App Extensions',
+      };
+      project.addToPbxBuildFileSection(buildFile);
+      embedPhase.files.push({ value: buildFile.uuid, comment: `${productName} in Embed App Extensions` });
+    }
+
     const widgetFile = `${WIDGET_TARGET}/WayykupAlarmWidget.swift`;
     IOSConfig.XcodeUtils.addBuildSourceFileToGroup({
       filepath: widgetFile,
