@@ -170,6 +170,7 @@ function withAlarmKitWidget(config) {
 <plist version="1.0"><dict>
   <key>CFBundleDevelopmentRegion</key><string>$(DEVELOPMENT_LANGUAGE)</string>
   <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleDisplayName</key><string>Wayykup</string>
   <key>CFBundleIdentifier</key><string>${mod.ios?.bundleIdentifier}.alarmkit-widget</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
