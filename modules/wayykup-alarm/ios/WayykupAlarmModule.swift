@@ -106,11 +106,11 @@ public final class WayykupAlarmModule: Module {
       NativeAlarmScheduler.clearPendingRing()
     }
 
-    AsyncFunction("startTestAlarm") async throws {
+    AsyncFunction("startTestAlarm") { () async throws in
       try await NativeAlarmScheduler.scheduleTest()
     }
 
-    AsyncFunction("startMicrophoneMeter") throws {
+    AsyncFunction("startMicrophoneMeter") { () throws in
       try self.microphoneMeter.start { dbfs in
         self.sendEvent("microphoneLevel", ["dbfs": dbfs])
       }
