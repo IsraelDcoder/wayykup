@@ -53,21 +53,40 @@ function withAndroidAlarmActivity(config) {
   });
 }
 
-function withRevenueCatHybridCommon(config) {
+function withWayykupPodTargets(config) {
   return withPodfile(config, (mod) => {
     const targetName = mod.ios?.name ?? 'Wayykup';
     const escapedTargetName = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const targetOpening = new RegExp(`(^[\\t ]*target\\s+['"]${escapedTargetName}['"]\\s+do\\s*$)`, 'm');
+    const targetOpening = new RegExp(`^([\\t ]*)target\\s+['"]${escapedTargetName}['"]\\s+do\\s*$`, 'm');
+    const widgetTargetPattern = new RegExp(`target\\s+['"]${WIDGET_TARGET}['"]\\s+do\\b`);
+    const legacyWidgetTarget = new RegExp(
+      `\\n[\\t ]*target\\s+['"]${WIDGET_TARGET}['"]\\s+do\\s*\\n[\\t ]*pod\\s+['"]WayykupAlarm['"],\\s*:path\\s*=>\\s*['"]\\.\\./modules/wayykup-alarm/ios['"]\\s*\\n[\\t ]*end\\s*$`,
+    );
     // RevenueCat 11.0.1 pins this version, which is not available from CocoaPods trunk.
-    const podDeclaration = "  pod 'PurchasesHybridCommon', :git => 'https://github.com/RevenueCat/purchases-hybrid-common.git', :tag => '20.4.0'";
-    const contents = mod.modResults.contents;
+    const revenueCatPod = "pod 'PurchasesHybridCommon', :git => 'https://github.com/RevenueCat/purchases-hybrid-common.git', :tag => '20.4.0'";
+    const widgetPod = "pod 'WayykupAlarm', :path => '../modules/wayykup-alarm/ios'";
+    const contents = mod.modResults.contents.replace(legacyWidgetTarget, '');
 
-    if (contents.includes("pod 'PurchasesHybridCommon'")) return mod;
-    if (!targetOpening.test(contents)) {
+    if (contents.includes("pod 'PurchasesHybridCommon'") && widgetTargetPattern.test(contents)) return mod;
+    const targetMatch = targetOpening.exec(contents);
+    if (!targetMatch) {
       throw new Error(`Wayykup could not find the ${targetName} target in its iOS Podfile.`);
     }
 
-    mod.modResults.contents = contents.replace(targetOpening, `$1\n${podDeclaration}`);
+    const indent = targetMatch[1];
+    const additions = [];
+    if (!contents.includes("pod 'PurchasesHybridCommon'")) {
+      additions.push(`${indent}  ${revenueCatPod}`);
+    }
+    if (!widgetTargetPattern.test(contents)) {
+      additions.push([
+        `${indent}  target '${WIDGET_TARGET}' do`,
+        `${indent}    inherit! :search_paths`,
+        `${indent}    ${widgetPod}`,
+        `${indent}  end`,
+      ].join('\n'));
+    }
+    mod.modResults.contents = contents.replace(targetOpening, (match) => `${match}\n${additions.join('\n')}`);
     return mod;
   });
 }
@@ -98,12 +117,6 @@ function withAlarmKitWidget(config) {
       fs.copyFileSync(path.join(mod.modRequest.projectRoot, 'assets', file), path.join(appDirectory, file));
     }
 
-    const podfile = path.join(projectRoot, 'Podfile');
-    let podfileText = fs.readFileSync(podfile, 'utf8');
-    if (!podfileText.includes(`target '${WIDGET_TARGET}'`)) {
-      podfileText += `\n\ntarget '${WIDGET_TARGET}' do\n  pod 'WayykupAlarm', :path => '../modules/wayykup-alarm/ios'\nend\n`;
-      fs.writeFileSync(podfile, podfileText);
-    }
     return mod;
   }]);
 
@@ -166,6 +179,6 @@ function withAlarmKitWidget(config) {
 module.exports = function withWayykupAlarm(config) {
   config = withAlarmKitInfo(config);
   config = withAndroidAlarmActivity(config);
-  config = withRevenueCatHybridCommon(config);
+  config = withWayykupPodTargets(config);
   return withAlarmKitWidget(config);
 };
