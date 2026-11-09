@@ -2,7 +2,6 @@ import ActivityKit
 import AlarmKit
 import SwiftUI
 import WidgetKit
-import WayykupAlarm
 
 @main
 struct WayykupAlarmWidgetBundle: WidgetBundle {

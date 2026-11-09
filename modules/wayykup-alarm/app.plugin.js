@@ -106,12 +106,17 @@ function withWayykupPodTargets(config) {
     const legacyWidgetTarget = new RegExp(
       `\\n[\\t ]*target\\s+['"]${WIDGET_TARGET}['"]\\s+do\\s*\\n[\\t ]*pod\\s+['"]WayykupAlarm['"],\\s*:path\\s*=>\\s*['"]\\.\\./modules/wayykup-alarm/ios['"]\\s*\\n[\\t ]*end\\s*$`,
     );
+    const widgetTargetBlock = new RegExp(
+      `(^[\\t ]*target\\s+['"]${WIDGET_TARGET}['"]\\s+do\\s*\\n)([\\s\\S]*?)(^[\\t ]*end\\s*$)`,
+      'm',
+    );
+    const widgetPodLine = /^[\t ]*pod\s+['"]WayykupAlarm['"],\s*:path\s*=>\s*['"]\.\.\/modules\/wayykup-alarm\/ios['"]\s*\r?\n?/gm;
     // RevenueCat 11.0.1 pins this version, which is not available from CocoaPods trunk.
     const revenueCatPod = "pod 'PurchasesHybridCommon', :git => 'https://github.com/RevenueCat/purchases-hybrid-common.git', :tag => '20.4.0'";
-    const widgetPod = "pod 'WayykupAlarm', :path => '../modules/wayykup-alarm/ios'";
-    const contents = mod.modResults.contents.replace(legacyWidgetTarget, '');
-
-    if (contents.includes("pod 'PurchasesHybridCommon'") && widgetTargetPattern.test(contents)) return mod;
+    let contents = mod.modResults.contents.replace(legacyWidgetTarget, '');
+    contents = contents.replace(widgetTargetBlock, (match, opening, body, closing) =>
+      `${opening}${body.replace(widgetPodLine, '')}${closing}`,
+    );
     const targetMatch = targetOpening.exec(contents);
     if (!targetMatch) {
       throw new Error(`Wayykup could not find the ${targetName} target in its iOS Podfile.`);
@@ -126,11 +131,12 @@ function withWayykupPodTargets(config) {
       additions.push([
         `${indent}  target '${WIDGET_TARGET}' do`,
         `${indent}    inherit! :search_paths`,
-        `${indent}    ${widgetPod}`,
         `${indent}  end`,
       ].join('\n'));
     }
-    mod.modResults.contents = contents.replace(targetOpening, (match) => `${match}\n${additions.join('\n')}`);
+    mod.modResults.contents = additions.length
+      ? contents.replace(targetOpening, (match) => `${match}\n${additions.join('\n')}`)
+      : contents;
     return mod;
   });
 }
@@ -146,6 +152,10 @@ function withAlarmKitWidget(config) {
     fs.copyFileSync(
       path.join(__dirname, 'ios', 'WayykupAlarmWidget.swift'),
       path.join(widgetDirectory, 'WayykupAlarmWidget.swift'),
+    );
+    fs.copyFileSync(
+      path.join(__dirname, 'ios', 'WayykupAlarmMetadata.swift'),
+      path.join(widgetDirectory, 'WayykupAlarmMetadata.swift'),
     );
     fs.writeFileSync(
       path.join(widgetDirectory, 'Info.plist'),
@@ -240,6 +250,13 @@ function withAlarmKitWidget(config) {
     const widgetFile = `${WIDGET_TARGET}/WayykupAlarmWidget.swift`;
     IOSConfig.XcodeUtils.addBuildSourceFileToGroup({
       filepath: widgetFile,
+      groupName: projectName,
+      project,
+      targetUuid,
+    });
+    const metadataFile = `${WIDGET_TARGET}/WayykupAlarmMetadata.swift`;
+    IOSConfig.XcodeUtils.addBuildSourceFileToGroup({
+      filepath: metadataFile,
       groupName: projectName,
       project,
       targetUuid,

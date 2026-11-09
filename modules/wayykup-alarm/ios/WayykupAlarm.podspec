@@ -16,5 +16,5 @@ Pod::Spec.new do |s|
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
   s.libraries = 'sqlite3'
-  s.source_files = 'WayykupAlarmModule.swift'
+  s.source_files = 'WayykupAlarmModule.swift', 'WayykupAlarmMetadata.swift'
 end

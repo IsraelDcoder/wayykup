@@ -1,4 +1,5 @@
 import ExpoModulesCore
+import ActivityKit
 import Foundation
 import SQLite3
 import UIKit
@@ -518,7 +519,7 @@ private enum NativeAlarmScheduler {
       metadata: metadata,
       tintColor: Color.orange
     )
-    let configuration = AlarmManager.AlarmConfiguration(
+    let configuration = AlarmManager.AlarmConfiguration<WayykupAlarmMetadata>(
       schedule: .fixed(date),
       attributes: attributes,
       stopIntent: RearmAlarmIntent(
@@ -585,7 +586,7 @@ private enum NativeAlarmScheduler {
       metadata: metadata,
       tintColor: Color.orange
     )
-    let configuration = AlarmManager.AlarmConfiguration(
+    let configuration = AlarmManager.AlarmConfiguration<WayykupAlarmMetadata>(
       schedule: .fixed(date),
       attributes: attributes,
       stopIntent: RearmAlarmIntent(
@@ -694,32 +695,6 @@ private enum NativeAlarmError: LocalizedError {
 }
 
 #if canImport(AlarmKit)
-@available(iOS 26.0, *)
-public struct WayykupAlarmMetadata: AlarmMetadata, Codable, Hashable {
-  public let alarmId: String
-  public let occurrenceId: String
-  public let challenge: String
-  public let sound: String
-  public let scheduledAt: Double
-  public let timeZone: String
-
-  public init(
-    alarmId: String,
-    occurrenceId: String,
-    challenge: String,
-    sound: String,
-    scheduledAt: Double,
-    timeZone: String
-  ) {
-    self.alarmId = alarmId
-    self.occurrenceId = occurrenceId
-    self.challenge = challenge
-    self.sound = sound
-    self.scheduledAt = scheduledAt
-    self.timeZone = timeZone
-  }
-}
-
 @available(iOS 26.0, *)
 private struct RearmAlarmIntent: LiveActivityIntent {
   static var title: LocalizedStringResource = "Re-arm Wayykup"
