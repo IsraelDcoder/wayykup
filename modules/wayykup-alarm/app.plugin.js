@@ -38,6 +38,50 @@ function withAlarmKitInfo(config) {
   });
 }
 
+function withEasWidgetExtension(config) {
+  const appBundleIdentifier = config.ios?.bundleIdentifier;
+  if (!appBundleIdentifier) {
+    throw new Error('Wayykup needs an iOS bundle identifier to configure its AlarmKit widget for EAS signing.');
+  }
+
+  const bundleIdentifier = `${appBundleIdentifier}.alarmkit-widget`;
+  const appExtensions = config.extra?.eas?.build?.experimental?.ios?.appExtensions ?? [];
+  const existing = appExtensions.find((extension) => extension.targetName === WIDGET_TARGET);
+  if (existing) {
+    if (existing.bundleIdentifier !== bundleIdentifier) {
+      throw new Error(
+        `Wayykup AlarmKit widget EAS bundle identifier must be ${bundleIdentifier}, not ${existing.bundleIdentifier}.`,
+      );
+    }
+    return config;
+  }
+
+  config.extra = {
+    ...config.extra,
+    eas: {
+      ...config.extra?.eas,
+      build: {
+        ...config.extra?.eas?.build,
+        experimental: {
+          ...config.extra?.eas?.build?.experimental,
+          ios: {
+            ...config.extra?.eas?.build?.experimental?.ios,
+            appExtensions: [
+              ...appExtensions,
+              {
+                targetName: WIDGET_TARGET,
+                bundleIdentifier,
+                entitlements: {},
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  return config;
+}
+
 function withAndroidAlarmActivity(config) {
   return withAndroidManifest(config, (mod) => {
     const application = mod.modResults.manifest.application?.[0];
@@ -232,6 +276,7 @@ function withAlarmKitWidget(config) {
 }
 
 module.exports = function withWayykupAlarm(config) {
+  config = withEasWidgetExtension(config);
   config = withAlarmKitInfo(config);
   config = withAndroidAlarmActivity(config);
   config = withWayykupPodTargets(config);
