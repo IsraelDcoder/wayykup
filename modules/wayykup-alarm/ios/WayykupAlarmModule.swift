@@ -542,7 +542,7 @@ private enum NativeAlarmScheduler {
         alarm["customSoundName"] as? String ?? soundResource(for: metadata.sound)
       )
     )
-    try AlarmManager.shared.schedule(id: id, configuration: configuration)
+    try await AlarmManager.shared.schedule(id: id, configuration: configuration)
     prefs.set(id.uuidString, forKey: alarmKitIdKey(alarmId))
   }
 
@@ -609,7 +609,7 @@ private enum NativeAlarmScheduler {
         alarm["customSoundName"] as? String ?? soundResource(for: metadata.sound)
       )
     )
-    try AlarmManager.shared.schedule(id: id, configuration: configuration)
+    try await AlarmManager.shared.schedule(id: id, configuration: configuration)
     ids.append(id.uuidString)
     prefs.set(ids, forKey: key)
   }
