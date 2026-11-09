@@ -16,7 +16,7 @@ struct WayykupAlarmLiveActivity: Widget {
       VStack(alignment: .leading, spacing: 8) {
         Text("WAYYKUP · TIME TO GET UP")
           .font(.headline.weight(.heavy))
-        Text(context.attributes.metadata.challenge)
+        Text(context.attributes.metadata?.challenge ?? "Wake up")
           .font(.title2.weight(.bold))
         Text("Complete your challenge to stop the alarm.")
           .font(.subheadline)
@@ -27,7 +27,7 @@ struct WayykupAlarmLiveActivity: Widget {
     } dynamicIsland: { context in
       DynamicIsland {
         DynamicIslandExpandedRegion(.center) {
-          Text("WAYYKUP · \(context.attributes.metadata.challenge.uppercased())")
+          Text("WAYYKUP · \((context.attributes.metadata?.challenge ?? "WAKE UP").uppercased())")
             .font(.headline.weight(.heavy))
         }
       } compactLeading: {
