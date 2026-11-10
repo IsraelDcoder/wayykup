@@ -11,7 +11,7 @@
       "bundleIdentifier": "com.wayykup.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSPhotoLibraryUsageDescription": "Wayykup uses photo access to recognize the target object in your Object Hunt wake-up challenge. Images are processed on-device and are not uploaded.",
+        "NSPhotoLibraryUsageDescription": "Wayykup needs photo-library access to recognize the target object in your Object Hunt wake-up challenge. Images are processed on-device and are not uploaded.",
         "NSMicrophoneUsageDescription": "Wayykup listens while you say your selected wake-up phrase. Audio is processed in memory on your device and never saved or uploaded.",
         "NSSpeechRecognitionUsageDescription": "Wayykup uses on-device speech recognition to verify your selected wake-up phrase."
       },
