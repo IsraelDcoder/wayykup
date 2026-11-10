@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f5f1">
+    <meta name="description" content="Get help setting up Wayykup alarms, wake-up challenges, and subscriptions.">
+    <title>Support — Wayykup</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #171817;
+        --muted: #656761;
+        --paper: #f6f5f1;
+        --card: #fffefa;
+        --accent: #ff5938;
+        --line: rgba(23, 24, 23, .13);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 16px/1.65 "Avenir Next", Avenir, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: #b93622; }
+      a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+      .hero {
+        padding: 38px 24px 44px;
+        background: #171817;
+        color: white;
+      }
+
+      .hero-inner, main {
+        width: min(100% - 40px, 780px);
+        margin: 0 auto;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 34px;
+        color: white;
+        font-size: 14px;
+        font-weight: 850;
+        letter-spacing: .14em;
+        text-decoration: none;
+        text-transform: uppercase;
+      }
+
+      .brand img { width: 34px; height: 34px; border-radius: 9px; }
+      h1, h2, p { margin-top: 0; }
+
+      h1 {
+        max-width: 650px;
+        margin-bottom: 10px;
+        font-size: clamp(2.6rem, 9vw, 4.5rem);
+        line-height: 1;
+        letter-spacing: -.06em;
+      }
+
+      .hero p { max-width: 570px; margin-bottom: 0; color: #d3d4d0; }
+      main { padding: 28px 0 52px; }
+
+      .intro, .contact, details {
+        margin-bottom: 14px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--card);
+      }
+
+      .intro, .contact { padding: 23px 25px; }
+      .intro { border-left: 4px solid var(--accent); }
+      .intro p:last-child, .contact p:last-child { margin-bottom: 0; }
+      h2 { margin-bottom: 8px; font-size: 1.15rem; line-height: 1.35; letter-spacing: -.02em; }
+      .muted { color: var(--muted); }
+
+      details { padding: 0 20px; }
+      summary {
+        padding: 17px 26px 17px 0;
+        cursor: pointer;
+        font-weight: 750;
+        line-height: 1.4;
+        list-style: none;
+        position: relative;
+      }
+      summary::-webkit-details-marker { display: none; }
+      summary::after {
+        position: absolute;
+        top: 16px;
+        right: 0;
+        color: var(--accent);
+        content: "+";
+        font-size: 21px;
+        line-height: 1;
+      }
+      details[open] summary::after { content: "−"; }
+      details p { padding: 0 0 17px; margin-bottom: 0; color: #4f504b; }
+
+      .contact {
+        margin-top: 22px;
+        background: #fff1ec;
+        border-color: rgba(255, 89, 56, .22);
+      }
+      .contact-link {
+        display: inline-flex;
+        min-height: 46px;
+        align-items: center;
+        margin-top: 5px;
+        padding: 0 17px;
+        border-radius: 999px;
+        background: var(--ink);
+        color: white;
+        font-weight: 750;
+        text-decoration: none;
+      }
+      .contact-link:hover { background: #30322f; }
+
+      footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 9px;
+        padding: 0 20px 30px;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+      }
+
+      @media (max-width: 520px) {
+        .hero { padding: 30px 0 36px; }
+        .hero-inner, main { width: min(100% - 28px, 780px); }
+        .brand { margin-bottom: 27px; }
+        .intro, .contact { padding: 19px; border-radius: 15px; }
+        details { padding: 0 16px; border-radius: 15px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero-inner">
+        <a class="brand" href="website/index.html" aria-label="Wayykup home">
+          <img src="assets/icon.png" alt="">
+          <span>Wayykup</span>
+        </a>
+        <h1>How can we help?</h1>
+        <p>Find answers to common questions about alarms, wake-up challenges, and your subscription.</p>
+      </div>
+    </header>
+
+    <main>
+      <div class="intro">
+        <p><strong>Need a hand?</strong> Browse the answers below or contact our support team. When writing in, include your device model, operating system version, and a short description of what happened. Please don’t include passwords or payment-card details.</p>
+      </div>
+
+      <section aria-label="Frequently asked questions">
+        <details>
+          <summary>How can I make sure my alarm rings?</summary>
+          <p>Keep your device charged, check that the alarm is enabled for the correct time and repeat days, and make sure Wayykup has the permissions requested by your device. Check your device’s alarm and notification volume, Focus or Do Not Disturb settings, and battery restrictions. Alarm behavior can vary by device and operating system, so test your setup before relying on an alarm. For an important wake-up, keep a backup alarm.</p>
+        </details>
+
+        <details>
+          <summary>Why does a challenge need camera, microphone, or motion access?</summary>
+          <p>Camera access is used for Object Hunt and Push-up Challenge. Microphone and speech-recognition access are used for Yell to Stop. Shake Your Phone uses motion sensor readings. If a permission is denied, the related challenge may not work. You can review or change app permissions in your device settings.</p>
+        </details>
+
+        <details>
+          <summary>What should I do if a challenge isn’t recognizing my attempt?</summary>
+          <p>Make sure the relevant permission is enabled and follow the on-screen instructions. For camera challenges, use good lighting, keep the target or your body clearly in frame, and try again. For Yell to Stop, speak the selected phrase clearly in a quiet space. If the challenge still doesn’t work, contact us with the challenge name and your device details.</p>
+        </details>
+
+        <details>
+          <summary>How do I restore a purchase or subscription?</summary>
+          <p>Open the in-app paywall and choose <strong>Restore Purchases</strong>. Make sure you’re signed in to the same Apple Account or Google Play account used for the original purchase. Store billing, cancellations, and refund requests are managed by the app store where you subscribed.</p>
+        </details>
+
+        <details>
+          <summary>How do I cancel my subscription?</summary>
+          <p>Subscriptions are managed by the store used to subscribe. On iPhone or iPad, open your Apple Account subscription settings. On Android, open Google Play’s Payments &amp; subscriptions settings. Removing the app does not cancel a subscription.</p>
+        </details>
+
+        <details>
+          <summary>What information should I include in a support request?</summary>
+          <p>Tell us what you were trying to do, what you expected, what happened instead, and when it happened. Include your device model, operating system version, and Wayykup app version if available. A screenshot can help; please remove personal or sensitive information first.</p>
+        </details>
+      </section>
+
+      <section class="contact" aria-labelledby="contact-title">
+        <h2 id="contact-title">Still need help?</h2>
+        <p>Contact the Wayykup support team by email. We’ll do our best to help.</p>
+        <a class="contact-link" href="mailto:support@wayykup.app?subject=Wayykup%20Support">Email support@wayykup.app</a>
+      </section>
+    </main>
+
+    <footer>
+      <a href="privacy%20policy.html">Privacy Policy</a>
+      <span aria-hidden="true">·</span>
+      <a href="terms%20of%20service.html">Terms of Service</a>
+      <span aria-hidden="true">·</span>
+      © 2026 Wayykup
+    </footer>
+  </body>
+</html>
