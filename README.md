@@ -25,9 +25,9 @@ npx eas-cli@latest build --profile development --platform ios
 npm run start:dev
 ```
 
-The app also uses native modules for on-device object recognition, accelerometer input, audio, RevenueCat, and Mixpanel.
+The app also uses native modules for on-device object recognition and pose detection, accelerometer input, audio, RevenueCat, and Mixpanel.
 
-Yell to Wake meters microphone levels in memory only. Android's native alarm service ducks its sound while the mic is scoring; scheduled iOS Yell alarms currently use the chosen fallback because AlarmKit playback cannot be safely muted by the current integration. Face Challenge uses front-camera ML Kit gesture detection and requires a newly built development client (not Expo Go). The face-detector package requires Android minSdk 26 and compileSdk 36. See the [wake challenge device checklist](./WAKE_CHALLENGE_DEVICE_TESTS.md) and [store privacy disclosure notes](./STORE_PRIVACY_DISCLOSURES.md).
+The only supported wake-up challenges are Yell to Stop, Push-up Challenge, Shake Your Phone, and Object Hunt. Yell to Stop uses on-device speech recognition. Push-up Challenge verifies shoulder, elbow, wrist, hip, and ankle landmarks with Apple Vision on iOS and ML Kit Pose Detection on Android; it counts only a complete, aligned down-and-up repetition. Pose samples are captured while the challenge is in the foreground and processed on-device. See the [wake challenge device checklist](./WAKE_CHALLENGE_DEVICE_TESTS.md) and [store privacy disclosure notes](./STORE_PRIVACY_DISCLOSURES.md).
 
 Copy `.env.example` to `.env` and add the public SDK keys for the relevant platforms. RevenueCat needs an offering containing `WEEKLY` and `ANNUAL` packages and an active entitlement named `wayykup_premium`. Configure the annual product's seven-day introductory trial in App Store Connect / Play Console and RevenueCat. The app does not contain store credentials.
 
@@ -41,11 +41,12 @@ All builds require an active `wayykup_premium` entitlement before opening the ap
 - Android does not request battery-optimization exemption. The app reports battery restrictions and directs users to system settings; OEM-specific behavior still needs physical-device testing.
 - No local alarm architecture can override a user's denied OS permissions or guarantee identical behavior across all OEM power managers. Test on a development or release build, never Expo Go.
 - Android writes ring starts and terminal events directly to `wayykup-stats.db`, even when JavaScript is unavailable. iOS AlarmKit intents write ring state when the system action runs; the pre-iOS-26 notification fallback is reduced-reliability. Android device logs use the `WayykupAlarm` tag.
-- QR challenges require linking the physical code in alarm settings. Shake challenges use the device accelerometer. Memory challenges reveal a short sequence, then require the user to enter it.
-- Object Hunt lets users select household targets. At alarm time Wayykup shuffles one target, takes a camera photo when the user taps the capture button, and checks its labels on-device (bundled ML Kit image labeling on Android and Apple Vision on iOS). A supported label at 25% confidence or higher displays a green “OBJECT RECOGNIZED” checkmark and completes the challenge. An unrecognized photo keeps the alarm active and can be retried. The built-in classifiers support common labels, not every variation or brand; adequate lighting and a clear view of the target improve recognition.
-- The selected object, onboarding progress, and alarm-audio preference are saved locally. The audio preference controls Wayykup's in-app player; operating-system notification audio may continue independently.
+- Shake Your Phone uses the device accelerometer and the target saved in the alarm configuration.
+- Object Hunt saves one selected household target per alarm. At alarm time Wayykup checks camera images on-device (ML Kit image labeling on Android and Apple Vision on iOS). Only a recognized target completes the challenge; an unrecognized image keeps the alarm active and can be retried. The built-in classifiers support common labels, not every variation or brand; adequate lighting and a clear view improve recognition.
+- Existing alarms that use a retired challenge are preserved with their time, repeat schedule, sound, label, and other settings, but are left unscheduled until the user selects one of the four supported challenges. Subscription and onboarding persistence are not changed by this migration.
+- The selected challenge and configuration, onboarding progress, and alarm-audio preference are saved locally. The audio preference controls Wayykup's in-app player; operating-system notification audio may continue independently.
 - Alarm sounds cannot raise the device's hardware volume. Savage mode increases the in-app player volume after a snooze; notification volume remains controlled by the operating system.
-- Alarm sounds can be selected from local audio files in the alarm editor. Wayykup copies selected files into app-private storage so the native alarm can access them after the picker closes; streaming or DRM-protected tracks are not available through the file picker. Custom sound playback must be verified in a native development build on each target platform.
+- The alarm sound library contains Police Siren, Air Raid, Fire Alarm, Industrial Klaxon, Accelerating Beeps, Metal Clang, Bass Earthquake, Screech, Emergency Two-Tone, and Chaos Final Boss. These ten bundled sounds are shared by onboarding, previews, Android native playback, and iOS AlarmKit/notification playback, and selections are saved as stable sound IDs.
 
 ## Validation
 

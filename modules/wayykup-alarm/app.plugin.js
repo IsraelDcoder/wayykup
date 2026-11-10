@@ -10,7 +10,31 @@ const {
 } = require('@expo/config-plugins');
 
 const WIDGET_TARGET = 'WayykupAlarmWidgetExtension';
-const SOUND_FILES = [
+const SOUND_MANIFEST = require('../../src/alarm-sounds.json');
+const SOUND_FILES = SOUND_MANIFEST.map(({ id }) => `${id}.caf`);
+const ANDROID_SOUND_FILES = SOUND_MANIFEST.map(({ id, file }) => ({
+  source: file,
+  resource: `wayykup_${id}.mp3`,
+}));
+const LEGACY_SOUND_FILES = [
+  'alarm_tone.wav',
+  'beacon.wav',
+  'bugle_call.wav',
+  'buzz_saw.wav',
+  'countdown.wav',
+  'dread_siren.wav',
+  'final_warning.wav',
+  'honk.wav',
+  'inferno.wav',
+  'jackhammer.wav',
+  'kitchen_phone.wav',
+  'nightmare.wav',
+  'panic_engine.wav',
+  'pulse.wav',
+  'redline.wav',
+  'warpath.wav',
+];
+const LEGACY_IOS_SOUND_FILES = [
   'alarm-tone.wav',
   'beacon.wav',
   'bugle-call.wav',
@@ -32,7 +56,9 @@ const SOUND_FILES = [
 function withAlarmKitInfo(config) {
   return withInfoPlist(config, (mod) => {
     mod.modResults.NSAlarmKitUsageDescription =
-      'Wayykup uses AlarmKit to ring scheduled wake-up alarms and open their challenges.';
+      'Wayykup uses AlarmKit to ring scheduled wake-up alarms and open the alarm screen.';
+    mod.modResults.NSSpeechRecognitionUsageDescription =
+      'Wayykup uses on-device speech recognition to verify your selected wake-up phrase.';
     mod.modResults.NSSupportsLiveActivities = true;
     return mod;
   });
@@ -84,7 +110,19 @@ function withEasWidgetExtension(config) {
 
 function withAndroidAlarmActivity(config) {
   return withAndroidManifest(config, (mod) => {
-    const application = mod.modResults.manifest.application?.[0];
+    const manifest = mod.modResults.manifest;
+    const queries = manifest.queries ?? (manifest.queries = []);
+    const hasSpeechQuery = queries.some((query) =>
+      query.intent?.some((intent) =>
+        intent.action?.some((action) => action.$['android:name'] === 'android.speech.RecognitionService'),
+      ),
+    );
+    if (!hasSpeechQuery) {
+      queries.push({
+        intent: [{ action: [{ $: { 'android:name': 'android.speech.RecognitionService' } }] }],
+      });
+    }
+    const application = manifest.application?.[0];
     if (!application) throw new Error('Wayykup alarm setup could not find the Android application manifest entry.');
     const mainActivity = application.activity?.find((activity) =>
       activity.$['android:name']?.endsWith('MainActivity'),
@@ -148,6 +186,29 @@ function withWayykupPodTargets(config) {
 }
 
 function withAlarmKitWidget(config) {
+  config = withDangerousMod(config, ['android', async (mod) => {
+    const rawDirectory = path.join(
+      mod.modRequest.projectRoot,
+      'modules',
+      'wayykup-alarm',
+      'android',
+      'src',
+      'main',
+      'res',
+      'raw',
+    );
+    fs.mkdirSync(rawDirectory, { recursive: true });
+    for (const file of LEGACY_SOUND_FILES) {
+      fs.rmSync(path.join(rawDirectory, file), { force: true });
+    }
+    for (const { source, resource } of ANDROID_SOUND_FILES) {
+      fs.copyFileSync(
+        path.join(mod.modRequest.projectRoot, 'Alarms', source),
+        path.join(rawDirectory, resource),
+      );
+    }
+    return mod;
+  }]);
   config = withDangerousMod(config, ['ios', async (mod) => {
     const projectRoot = mod.modRequest.platformProjectRoot;
     const projectName = IOSConfig.XcodeUtils.getProjectName(mod.modRequest.projectRoot);
@@ -163,6 +224,9 @@ function withAlarmKitWidget(config) {
       path.join(__dirname, 'ios', 'WayykupAlarmMetadata.swift'),
       path.join(widgetDirectory, 'WayykupAlarmMetadata.swift'),
     );
+    for (const file of LEGACY_IOS_SOUND_FILES) {
+      fs.rmSync(path.join(appDirectory, file), { force: true });
+    }
     fs.writeFileSync(
       path.join(widgetDirectory, 'Info.plist'),
       `<?xml version="1.0" encoding="UTF-8"?>
@@ -183,7 +247,7 @@ function withAlarmKitWidget(config) {
 </dict></plist>`,
     );
     for (const file of SOUND_FILES) {
-      fs.copyFileSync(path.join(mod.modRequest.projectRoot, 'assets', file), path.join(appDirectory, file));
+      fs.copyFileSync(path.join(mod.modRequest.projectRoot, 'assets', 'alarm-sounds', file), path.join(appDirectory, file));
     }
 
     return mod;
@@ -192,6 +256,9 @@ function withAlarmKitWidget(config) {
   return withXcodeProject(config, (mod) => {
     const project = mod.modResults;
     const projectName = IOSConfig.XcodeUtils.getProjectName(mod.modRequest.projectRoot);
+    for (const file of LEGACY_IOS_SOUND_FILES) {
+      project.removeResourceFile(`${projectName}/${file}`, {});
+    }
     let target = Object.entries(project.pbxNativeTargetSection())
       .find(([, value]) => value.name?.replaceAll('"', '') === WIDGET_TARGET);
     if (!target) {

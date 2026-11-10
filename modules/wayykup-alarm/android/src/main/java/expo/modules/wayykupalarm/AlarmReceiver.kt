@@ -32,8 +32,24 @@ class AlarmReceiver : BroadcastReceiver() {
       timeZone = intent.getStringExtra(AlarmContract.EXTRA_TIME_ZONE) ?: java.util.TimeZone.getDefault().id
       val repeatDays = alarm.optJSONArray("days") ?: org.json.JSONArray()
       if (!alarm.optBoolean("testAlarm", false) && repeatDays.length() > 0) {
-        AlarmScheduler.scheduleNext(context, alarm, scheduledAt)
+        try {
+          AlarmScheduler.scheduleNext(context, alarm, scheduledAt)
+        } catch (error: Exception) {
+          Log.e("WayykupAlarm", "event=repeat_alarm_reschedule_failed alarmId=$alarmId", error)
+          context.sendBroadcast(Intent(AlarmContract.ACTION_HEALTH_CHANGED).setPackage(context.packageName))
+        }
+      } else {
+        try {
+          AlarmStore.markOneShotFired(context, alarm)
+        } catch (error: Exception) {
+          Log.e("WayykupAlarm", "event=one_shot_state_persist_failed alarmId=$alarmId", error)
+        }
       }
+    }
+
+    if (AlarmStore.isOccurrenceDismissed(context, occurrenceId)) {
+      Log.i("WayykupAlarm", "event=duplicate_dismissed_occurrence_ignored alarmId=$alarmId occurrenceId=$occurrenceId")
+      return
     }
 
     val serviceIntent = Intent(context, RingService::class.java)
@@ -43,6 +59,7 @@ class AlarmReceiver : BroadcastReceiver() {
       .putExtra(AlarmContract.EXTRA_ALARM_ID, alarmId)
       .putExtra(AlarmContract.EXTRA_OCCURRENCE_ID, occurrenceId)
       .putExtra(AlarmContract.EXTRA_TIME_ZONE, timeZone)
+      .putExtra(AlarmContract.EXTRA_IS_REARM, intent.action == AlarmContract.ACTION_REARM_FIRED)
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ContextCompat.startForegroundService(context, serviceIntent)

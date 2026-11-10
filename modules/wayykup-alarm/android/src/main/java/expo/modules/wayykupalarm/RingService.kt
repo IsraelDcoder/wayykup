@@ -29,8 +29,8 @@ class RingService : Service() {
   private var scheduledAt = 0L
   private var ringStartedAt = 0L
   private var audioFocusRequest: AudioFocusRequest? = null
+  private var alarmStreamVolumeBeforeRing: Int? = null
   private val handler = Handler(Looper.getMainLooper())
-  private var completedByChallenge = false
   private var currentTier = 0
   private var alarmAudioDucked = false
 
@@ -47,13 +47,40 @@ class RingService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent == null) {
+      resumePendingRing()
+      return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
+    }
     when (intent?.action) {
+      ACTION_SERVICE_CANCEL -> {
+        val requestedAlarmId = intent.getStringExtra(AlarmContract.EXTRA_ALARM_ID)
+        if (requestedAlarmId != null && requestedAlarmId == alarmId) {
+          stopRinging()
+          stopForeground(STOP_FOREGROUND_REMOVE)
+          stopSelf(startId)
+          return START_NOT_STICKY
+        }
+        if (ringStartedAt == 0L) stopSelf(startId)
+        return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
+      }
       ACTION_SERVICE_COMPLETED -> {
-        completedByChallenge = true
-        alarmId = intent.getStringExtra(AlarmContract.EXTRA_ALARM_ID) ?: alarmId
-        occurrenceId?.let { OccurrenceWriter.resolve(this, it, "completed") }
-        alarmId?.let { AlarmStore.clearPendingRing(this) }
+        val requestedAlarmId = intent.getStringExtra(AlarmContract.EXTRA_ALARM_ID)
+        val requestedOccurrenceId = intent.getStringExtra(AlarmContract.EXTRA_OCCURRENCE_ID)
+        if (
+          requestedAlarmId == null
+          || requestedOccurrenceId == null
+          || (ringStartedAt > 0L && (alarmId != requestedAlarmId || occurrenceId != requestedOccurrenceId))
+          || !AlarmStore.markDismissed(this, requestedAlarmId, requestedOccurrenceId)
+        ) {
+          Log.w(TAG, "event=unverified_alarm_dismissal_rejected alarmId=$requestedAlarmId occurrenceId=$requestedOccurrenceId")
+          return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
+        }
+        alarmId = requestedAlarmId
+        occurrenceId = requestedOccurrenceId
+        OccurrenceWriter.resolve(this, requestedOccurrenceId, "completed")
         stopRinging()
+        if (startNextQueuedRing()) return START_STICKY
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
         return START_NOT_STICKY
       }
@@ -71,12 +98,16 @@ class RingService : Service() {
               .build()
           )
         }
-        stopRinging()
-        alarmId?.let {
-          val delay = intent.getLongExtra(AlarmContract.EXTRA_DELAY_MS, 75_000L)
-          AlarmScheduler.rearm(this, it, delay)
+        try {
+          alarmId?.let {
+            val delay = intent.getLongExtra(AlarmContract.EXTRA_DELAY_MS, 75_000L)
+            AlarmScheduler.rearm(this, it, delay)
+          }
+        } catch (error: Exception) {
+          Log.e(TAG, "event=rearm_failed alarmId=$alarmId", error)
+          return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
         }
-        completedByChallenge = true
+        stopRinging()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
         return START_NOT_STICKY
@@ -99,35 +130,116 @@ class RingService : Service() {
             }, step * stepDelayMs)
           }
         }
-        return START_NOT_STICKY
+        return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
       }
-      ACTION_START -> startRing(intent)
+      ACTION_SET_VOLUME_TIER -> {
+        currentTier = maxOf(currentTier, intent.getIntExtra(EXTRA_VOLUME_TIER, 0).coerceIn(0, 3))
+        if (!alarmAudioDucked) player?.setVolume(volumeForTier(currentTier), volumeForTier(currentTier))
+        return if (ringStartedAt > 0L) START_STICKY else START_NOT_STICKY
+      }
+      ACTION_START -> {
+        startRing(intent)
+        return START_STICKY
+      }
       else -> return START_NOT_STICKY
     }
     return START_NOT_STICKY
   }
 
-  private fun startRing(intent: Intent) {
-    val json = intent.getStringExtra(AlarmContract.EXTRA_ALARM)
-    alarm = json?.let(::JSONObject)
-    val currentAlarm = alarm ?: run {
+  private fun resumePendingRing() {
+    val pending = AlarmStore.getPendingRing(this)
+    val pendingAlarmId = pending?.get("alarmId") as? String
+    val pendingAlarm = pendingAlarmId?.let { AlarmStore.readAlarms(this)[it] }
+    if (
+      pending == null
+      || pending["snoozed"] == true
+      || (pending["state"] as? String) !in setOf("ringing", "challenge_pending", "challenge_active")
+      || pendingAlarm == null
+    ) {
       stopSelf()
       return
     }
-    alarmId = currentAlarm.optString("id")
-    scheduledAt = intent.getLongExtra(AlarmContract.EXTRA_SCHEDULED_AT, System.currentTimeMillis())
+    startRing(
+      Intent()
+        .putExtra(AlarmContract.EXTRA_ALARM, pendingAlarm.toString())
+        .putExtra(AlarmContract.EXTRA_ALARM_ID, pendingAlarmId)
+        .putExtra(AlarmContract.EXTRA_SCHEDULED_AT, pending["scheduledAt"] as Long)
+        .putExtra(AlarmContract.EXTRA_OCCURRENCE_ID, pending["occurrenceId"] as String)
+        .putExtra(AlarmContract.EXTRA_TIME_ZONE, pending["timeZone"] as String)
+    )
+  }
+
+  private fun startRing(intent: Intent) {
+    val json = intent.getStringExtra(AlarmContract.EXTRA_ALARM)
+    val currentAlarm = json?.let(::JSONObject) ?: run {
+      stopSelf()
+      return
+    }
+    val incomingAlarmId = currentAlarm.optString("id")
+    val incomingScheduledAt = intent.getLongExtra(AlarmContract.EXTRA_SCHEDULED_AT, System.currentTimeMillis())
+    val incomingOccurrenceId = intent.getStringExtra(AlarmContract.EXTRA_OCCURRENCE_ID)
+      ?: AlarmStore.occurrenceId(incomingAlarmId, incomingScheduledAt)
+    val isRearm = intent.getBooleanExtra(AlarmContract.EXTRA_IS_REARM, false)
+    val pending = AlarmStore.getPendingRing(this)
+    val pendingState = pending?.get("state") as? String
+    val pendingIsActive = pending != null
+      && pending["snoozed"] != true
+      && (
+        pendingState == "ringing"
+          || pendingState == "challenge_pending"
+          || pendingState == "challenge_active"
+          || pendingState == "challenge_completed"
+      )
+    if (pendingIsActive && pending?.get("occurrenceId") != incomingOccurrenceId) {
+      if (ringStartedAt == 0L) resumePendingRing()
+      AlarmStore.queueRing(
+        this,
+        currentAlarm,
+        incomingOccurrenceId,
+        incomingScheduledAt,
+        intent.getStringExtra(AlarmContract.EXTRA_TIME_ZONE) ?: java.util.TimeZone.getDefault().id,
+        isRearm
+      )
+      Log.i(TAG, "event=overlapping_occurrence_queued alarmId=$incomingAlarmId occurrenceId=$incomingOccurrenceId")
+      return
+    }
+    if (
+      ringStartedAt > 0L
+      && alarmId == incomingAlarmId
+      && occurrenceId == incomingOccurrenceId
+      && player?.isPlaying == true
+    ) return
+    alarm = currentAlarm
+    alarmId = incomingAlarmId
+    scheduledAt = incomingScheduledAt
     ringStartedAt = System.currentTimeMillis()
-    occurrenceId = intent.getStringExtra(AlarmContract.EXTRA_OCCURRENCE_ID)
-      ?: AlarmStore.occurrenceId(alarmId ?: return, scheduledAt)
-    completedByChallenge = false
+    occurrenceId = incomingOccurrenceId
+    if (wakeLock == null || wakeLock?.isHeld != true) {
+      val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+      wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Wayykup:AlarmRing").apply {
+        setReferenceCounted(false)
+        acquire(30 * 60 * 1000L)
+      }
+    }
     alarmAudioDucked = false
-    currentTier = if (currentAlarm.optString("sound") in HIGH_INTENSITY_SOUNDS) 2 else 0
+    val baseTier = if (currentAlarm.optString("sound") in HIGH_INTENSITY_SOUNDS) 2 else 0
+    val rearmCount = alarmId?.let { AlarmStore.chain(this, it).second } ?: 0
+    currentTier = (baseTier + rearmCount).coerceIn(0, 3)
 
     startForeground(NOTIFICATION_ID, buildNotification(currentAlarm))
+    maximizeAlarmStreamVolume()
     val timeZone = intent.getStringExtra(AlarmContract.EXTRA_TIME_ZONE)
       ?: java.util.TimeZone.getDefault().id
     OccurrenceWriter.markRinging(this, currentAlarm, occurrenceId!!, scheduledAt, ringStartedAt, timeZone)
-    AlarmStore.savePendingRing(this, currentAlarm, occurrenceId!!, ringStartedAt, scheduledAt, timeZone)
+    AlarmStore.savePendingRing(
+      this,
+      currentAlarm,
+      occurrenceId!!,
+      ringStartedAt,
+      scheduledAt,
+      timeZone,
+      isRearm
+    )
     val latency = ringStartedAt - scheduledAt
     Log.i(
       TAG,
@@ -140,13 +252,32 @@ class RingService : Service() {
         .putExtra("occurrenceId", occurrenceId)
         .putExtra("at", ringStartedAt)
         .putExtra("scheduledAt", scheduledAt)
-        .putExtra("challenge", currentAlarm.optString("task", "Math"))
-        .putExtra("sound", currentAlarm.optString("sound", "Air raid"))
+        .putExtra("challenge", currentAlarm.optString("task", "Shake Your Phone"))
+        .putExtra("sound", currentAlarm.optString("sound", "police_siren"))
         .putExtra("testAlarm", currentAlarm.optBoolean("testAlarm", false))
+        .putExtra("state", AlarmStore.getPendingRing(this)?.get("state") as? String ?: "ringing")
     )
-    playSound(currentAlarm.optString("sound", "Air raid"))
-    openChallenge()
+    playSound(currentAlarm.optString("sound", "police_siren"))
+    openAlarmInterface()
     handler.postDelayed(escalateRunnable, ESCALATION_INTERVAL_MS)
+  }
+
+  private fun startNextQueuedRing(): Boolean {
+    while (true) {
+      val queued = AlarmStore.takeNextQueuedRing(this) ?: return false
+      val queuedAlarm = queued["alarm"] as? String ?: continue
+      val queuedOccurrenceId = queued["occurrenceId"] as? String ?: continue
+      if (AlarmStore.isOccurrenceDismissed(this, queuedOccurrenceId)) continue
+      startRing(
+        Intent()
+          .putExtra(AlarmContract.EXTRA_ALARM, queuedAlarm)
+          .putExtra(AlarmContract.EXTRA_SCHEDULED_AT, queued["scheduledAt"] as Long)
+          .putExtra(AlarmContract.EXTRA_OCCURRENCE_ID, queuedOccurrenceId)
+          .putExtra(AlarmContract.EXTRA_TIME_ZONE, queued["timeZone"] as String)
+          .putExtra(AlarmContract.EXTRA_IS_REARM, queued["isRearm"] as Boolean)
+      )
+      return ringStartedAt > 0L
+    }
   }
 
   private fun buildNotification(currentAlarm: JSONObject): Notification {
@@ -156,14 +287,6 @@ class RingService : Service() {
       Intent(this, ChallengeActivity::class.java)
         .putExtra(AlarmContract.EXTRA_ALARM_ID, currentAlarm.optString("id"))
         .putExtra(AlarmContract.EXTRA_OCCURRENCE_ID, occurrenceId),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    val systemStop = PendingIntent.getBroadcast(
-      this,
-      currentAlarm.optString("id").hashCode(),
-      Intent(this, AlarmActionReceiver::class.java)
-        .setAction(AlarmContract.ACTION_SYSTEM_STOP)
-        .putExtra(AlarmContract.EXTRA_ALARM_ID, currentAlarm.optString("id")),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
     return NotificationCompat.Builder(this, AlarmContract.CHANNEL_ID)
@@ -177,7 +300,6 @@ class RingService : Service() {
       .setAutoCancel(false)
       .setFullScreenIntent(showChallenge, true)
       .setContentIntent(showChallenge)
-      .addAction(android.R.drawable.ic_lock_idle_alarm, "Stop and re-arm", systemStop)
       .build()
   }
 
@@ -209,31 +331,20 @@ class RingService : Service() {
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
         )
-        val customSoundUri = alarm?.optString("customSoundUri").orEmpty()
-        if (customSoundUri.isNotBlank()) {
-          setDataSource(this@RingService, android.net.Uri.parse(customSoundUri))
-        } else {
-          val resourceName = soundName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-          val resourceId = when (resourceName) {
-            "dread_siren" -> R.raw.dread_siren
-            "panic_engine" -> R.raw.panic_engine
-            "nightmare" -> R.raw.nightmare
-            "final_warning" -> R.raw.final_warning
-            "beacon" -> R.raw.beacon
-            "buzz_saw" -> R.raw.buzz_saw
-            "kitchen_phone" -> R.raw.kitchen_phone
-            "pulse" -> R.raw.pulse
-            "honk" -> R.raw.honk
-            "inferno" -> R.raw.inferno
-            "redline" -> R.raw.redline
-            "bugle_call" -> R.raw.bugle_call
-            "countdown" -> R.raw.countdown
-            "jackhammer" -> R.raw.jackhammer
-            "warpath" -> R.raw.warpath
-            else -> R.raw.alarm_tone
-          }
-          setDataSource(this@RingService, android.net.Uri.parse("android.resource://$packageName/$resourceId"))
+        val resourceId = when (soundName) {
+          "police_siren" -> R.raw.wayykup_police_siren
+          "air_raid" -> R.raw.wayykup_air_raid
+          "fire_alarm" -> R.raw.wayykup_fire_alarm
+          "industrial_klaxon" -> R.raw.wayykup_industrial_klaxon
+          "accelerating_beeps" -> R.raw.wayykup_accelerating_beeps
+          "metal_clang" -> R.raw.wayykup_metal_clang
+          "bass_earthquake" -> R.raw.wayykup_bass_earthquake
+          "screech" -> R.raw.wayykup_screech
+          "emergency_two_tone" -> R.raw.wayykup_emergency_two_tone
+          "chaos_final_boss" -> R.raw.wayykup_chaos_final_boss
+          else -> R.raw.wayykup_police_siren
         }
+        setDataSource(this@RingService, android.net.Uri.parse("android.resource://$packageName/$resourceId"))
         isLooping = true
         setOnPreparedListener {
           val volume = if (alarmAudioDucked) 0f else volumeForTier(currentTier)
@@ -276,14 +387,6 @@ class RingService : Service() {
 
   private val escalateRunnable = object : Runnable {
     override fun run() {
-      val elapsed = System.currentTimeMillis() - ringStartedAt
-      if (elapsed >= MAX_RING_MS) {
-        occurrenceId?.let { OccurrenceWriter.resolve(this@RingService, it, "bypassed") }
-        alarmId?.let { AlarmStore.clearChain(this@RingService, it) }
-        stopRinging()
-        stopSelf()
-        return
-      }
       currentTier = (currentTier + 1).coerceAtMost(3)
       if (!alarmAudioDucked) player?.setVolume(volumeForTier(currentTier), volumeForTier(currentTier))
       handler.postDelayed(this, ESCALATION_INTERVAL_MS)
@@ -297,7 +400,7 @@ class RingService : Service() {
     else -> 1f
   }
 
-  private fun openChallenge() {
+  private fun openAlarmInterface() {
     val intent = Intent(this, ChallengeActivity::class.java)
       .putExtra(AlarmContract.EXTRA_ALARM_ID, alarmId)
       .putExtra(AlarmContract.EXTRA_OCCURRENCE_ID, occurrenceId)
@@ -329,28 +432,59 @@ class RingService : Service() {
       @Suppress("DEPRECATION")
       manager?.abandonAudioFocus(null)
     }
+    restoreAlarmStreamVolume()
     (getSystemService(NotificationManager::class.java))?.cancel(NOTIFICATION_ID)
+    ringStartedAt = 0L
   }
 
   override fun onDestroy() {
-    if (!completedByChallenge && ringStartedAt > 0 && System.currentTimeMillis() - ringStartedAt < MAX_RING_MS) {
-      alarmId?.let { AlarmScheduler.rearm(this, it) }
-    }
     stopRinging()
     super.onDestroy()
   }
 
+  private fun maximizeAlarmStreamVolume() {
+    val manager = getSystemService(AudioManager::class.java) ?: return
+    try {
+      if (alarmStreamVolumeBeforeRing == null) {
+        alarmStreamVolumeBeforeRing = manager.getStreamVolume(AudioManager.STREAM_ALARM)
+      }
+      manager.setStreamVolume(
+        AudioManager.STREAM_ALARM,
+        manager.getStreamMaxVolume(AudioManager.STREAM_ALARM),
+        0
+      )
+    } catch (error: SecurityException) {
+      Log.e(TAG, "Could not raise the alarm stream volume.", error)
+    }
+  }
+
+  private fun restoreAlarmStreamVolume() {
+    val originalVolume = alarmStreamVolumeBeforeRing ?: return
+    alarmStreamVolumeBeforeRing = null
+    val manager = getSystemService(AudioManager::class.java) ?: return
+    try {
+      val maxVolume = manager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+      if (manager.getStreamVolume(AudioManager.STREAM_ALARM) == maxVolume) {
+        manager.setStreamVolume(AudioManager.STREAM_ALARM, originalVolume.coerceIn(0, maxVolume), 0)
+      }
+    } catch (error: SecurityException) {
+      Log.e(TAG, "Could not restore the alarm stream volume.", error)
+    }
+  }
+
   companion object {
-    private val HIGH_INTENSITY_SOUNDS = setOf("Dread Siren", "Panic Engine", "Nightmare", "Final Warning")
+    private val HIGH_INTENSITY_SOUNDS = setOf("screech", "emergency_two_tone", "chaos_final_boss")
     private const val TAG = "WayykupAlarm"
     private const val NOTIFICATION_ID = 42100
     private const val ESCALATION_INTERVAL_MS = 60 * 1000L
     private const val AUDIO_FADE_STEP_MS = 40L
-    private const val MAX_RING_MS = 30 * 60 * 1000L
     const val ACTION_START = "com.wayykup.alarm.SERVICE_START"
+    const val ACTION_SERVICE_CANCEL = "com.wayykup.alarm.SERVICE_CANCEL"
     const val ACTION_SERVICE_COMPLETED = "com.wayykup.alarm.SERVICE_COMPLETED"
     const val ACTION_SET_AUDIO_DUCKED = "com.wayykup.alarm.SERVICE_SET_AUDIO_DUCKED"
+    const val ACTION_SET_VOLUME_TIER = "com.wayykup.alarm.SERVICE_SET_VOLUME_TIER"
     const val EXTRA_AUDIO_DUCKED = "audioDucked"
     const val EXTRA_AUDIO_FADE_DURATION_MS = "audioFadeDurationMs"
+    const val EXTRA_VOLUME_TIER = "volumeTier"
   }
 }

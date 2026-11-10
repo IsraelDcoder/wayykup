@@ -1,0 +1,62 @@
+[
+  {
+    "id": "police_siren",
+    "name": "Police Siren",
+    "category": "Emergency",
+    "file": "01-police-siren.mp3"
+  },
+  {
+    "id": "air_raid",
+    "name": "Air Raid",
+    "category": "Emergency",
+    "file": "02-air-raid.mp3"
+  },
+  {
+    "id": "fire_alarm",
+    "name": "Fire Alarm",
+    "category": "Emergency",
+    "file": "03-fire-alarm.mp3"
+  },
+  {
+    "id": "industrial_klaxon",
+    "name": "Industrial Klaxon",
+    "category": "Industrial",
+    "file": "04-industrial-klaxon.mp3"
+  },
+  {
+    "id": "accelerating_beeps",
+    "name": "Accelerating Beeps",
+    "category": "Industrial",
+    "file": "05-accelerating-beeps.mp3"
+  },
+  {
+    "id": "metal_clang",
+    "name": "Metal Clang",
+    "category": "Industrial",
+    "file": "06-metal-clang.mp3"
+  },
+  {
+    "id": "bass_earthquake",
+    "name": "Bass Earthquake",
+    "category": "Intense",
+    "file": "07-bass-earthquake.mp3"
+  },
+  {
+    "id": "screech",
+    "name": "Screech",
+    "category": "Intense",
+    "file": "08-screech.mp3"
+  },
+  {
+    "id": "emergency_two_tone",
+    "name": "Emergency Two-Tone",
+    "category": "Intense",
+    "file": "09-emergency-two-tone.mp3"
+  },
+  {
+    "id": "chaos_final_boss",
+    "name": "Chaos Final Boss",
+    "category": "Extreme",
+    "file": "10-chaos-final-boss.mp3"
+  }
+]

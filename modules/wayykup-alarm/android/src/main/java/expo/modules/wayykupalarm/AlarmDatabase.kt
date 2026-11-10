@@ -38,9 +38,6 @@ internal class AlarmDatabase(context: Context) {
         soundId TEXT NOT NULL,
         morningRating INTEGER CHECK (morningRating BETWEEN 1 AND 5),
         shakesCounted INTEGER,
-        steps INTEGER,
-        mathCorrect INTEGER,
-        mathAttempts INTEGER,
         challengeDurationMs INTEGER,
         UNIQUE (alarmId, localDate)
       )"""
@@ -64,8 +61,8 @@ internal object OccurrenceWriter {
   ) {
     try {
       val localDate = occurrenceId.substringAfterLast(':')
-      val challenge = challengeFor(alarm.optString("task", "Math"))
-      val soundId = alarm.optString("sound", "Air raid")
+      val challenge = challengeFor(alarm.optString("task", "Shake Your Phone"))
+      val soundId = alarm.optString("sound", "police_siren")
         .lowercase()
         .replace(Regex("[^a-z0-9]+"), "_")
         .trim('_')
@@ -135,24 +132,32 @@ internal object OccurrenceWriter {
   }
 
   private fun challengeFor(task: String): String = when (task) {
-    "Math" -> "math"
-    "Shake" -> "shake"
-    "QR scan" -> "qr"
-    "Memory" -> "memory"
+    "Yell to Stop" -> "yell_to_stop"
+    "Push-up Challenge" -> "push_up"
+    "Shake Your Phone" -> "shake_phone"
     "Object Hunt" -> "object_hunt"
-    "Toothbrush" -> "toothbrush"
-    "Yell to Wake" -> "yell"
-    "Face Challenge" -> "face"
-    else -> "exercise"
+    else -> "legacy"
   }
 
-  private fun difficultyFor(alarm: JSONObject): Int = when (alarm.optString("task")) {
-    "Math" -> when (alarm.optString("mathDifficulty")) {
-      "Hard" -> 3
-      "Easy" -> 1
-      else -> 2
+  private fun difficultyFor(alarm: JSONObject): Int {
+    val config = alarm.optJSONObject("challengeConfig")
+    return when (alarm.optString("task")) {
+      "Push-up Challenge" -> when (config?.optInt("targetCount", 10)) {
+        5 -> 1
+        10 -> 2
+        else -> 3
+      }
+      "Shake Your Phone" -> when (config?.optInt("targetCount", 25)) {
+        10, 25 -> 1
+        50, 100 -> 2
+        else -> 3
+      }
+      "Object Hunt" -> when (config?.optString("difficulty", "easy")) {
+        "medium" -> 2
+        "hard" -> 3
+        else -> 1
+      }
+      else -> 1
     }
-    "Shake" -> (alarm.optInt("shakeCount", 100) / 50).coerceIn(1, 4)
-    else -> 1
   }
 }

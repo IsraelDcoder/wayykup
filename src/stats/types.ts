@@ -7,7 +7,7 @@ export type OccurrenceStatus =
   | 'missed'
   | 'skipped';
 
-export type ChallengeType = 'math' | 'shake' | 'qr' | 'memory' | 'object_hunt' | 'toothbrush' | 'push_ups' | 'squats' | 'exercise' | 'yell' | 'face';
+export type ChallengeType = 'yell_to_stop' | 'push_up' | 'shake_phone' | 'object_hunt' | 'legacy';
 export type WakeTier = 'gentle' | 'standard' | 'brutal';
 export type StatsPeriod = 'week' | 'month' | 'all';
 
@@ -28,9 +28,6 @@ export type Occurrence = {
   soundId: string;
   morningRating?: 1 | 2 | 3 | 4 | 5 | null;
   shakesCounted?: number | null;
-  steps?: number | null;
-  mathCorrect?: number | null;
-  mathAttempts?: number | null;
   challengeDurationMs?: number | null;
 };
 

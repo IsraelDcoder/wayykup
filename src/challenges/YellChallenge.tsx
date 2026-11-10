@@ -1,332 +1,169 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, AppState, Platform, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, AppState, Platform, Text, TouchableOpacity, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import {
-  getRecordingPermissionsAsync,
-  setAudioModeAsync,
-} from 'expo-audio';
+import { requestRecordingPermissionsAsync } from 'expo-audio';
 import {
   addAlarmListener,
-  startMicrophoneMeter,
-  stopMicrophoneMeter,
+  startSpeechRecognition,
+  stopSpeechRecognition,
 } from '../../modules/wayykup-alarm';
-import { WAKE_CHALLENGE_CONFIG } from './config';
-import {
-  createYellState,
-  powerScore,
-  updateYellState,
-  yellProgress,
-  type YellMode,
-  type YellState,
-} from './yellMachine';
 import { styles } from './challengeStyles';
 
 type Props = {
   active: boolean;
-  mode: YellMode;
-  preview?: boolean;
+  phrase: string;
   onComplete: (result: { durationMs: number; attempts: number; power: number }) => void;
-  onFallback: (reason: string, result: { durationMs: number; attempts: number }) => void;
-  onAlarmAudibleChange?: (audible: boolean) => void | Promise<void>;
+  onError: (reason: string) => void;
   trackEvent: (name: string, properties: Record<string, string | number | boolean>) => void;
 };
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)] ?? -60;
-}
+type Status = 'ready' | 'listening' | 'success';
 
-export function YellChallenge({
-  active,
-  mode,
-  preview = false,
-  onComplete,
-  onFallback,
-  onAlarmAudibleChange,
-  trackEvent,
-}: Props) {
-  const [progress, setProgress] = useState(0);
-  const [power, setPower] = useState(0);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [calibrating, setCalibrating] = useState(true);
-  const [success, setSuccess] = useState(false);
-  const [alarmAudible, setAlarmAudible] = useState(false);
-  const [scale] = useState(() => new Animated.Value(1));
+export function YellChallenge({ active, phrase, onComplete, onError, trackEvent }: Props) {
+  const [status, setStatus] = useState<Status>('ready');
+  const [message, setMessage] = useState('');
+  const [attempts, setAttempts] = useState(0);
   const startedAt = useRef(0);
-  const lastProgressAt = useRef(0);
-  const latestState = useRef<YellState | null>(null);
-  const samples = useRef<number[]>([]);
-  const finishOnce = useRef(false);
-  const lastMilestone = useRef(0);
-  const alarmAudibleRef = useRef(false);
-  const calibratingRef = useRef(true);
-  const powerRef = useRef(0);
-  const meterStartedAt = useRef(0);
-  const lastMeterEventAt = useRef(0);
-  const calibrationStartedAt = useRef(0);
-  const scorePausedUntil = useRef(0);
-  const callbacks = useRef({ onComplete, onFallback, onAlarmAudibleChange, trackEvent });
+  const finished = useRef(false);
+  const attemptsRef = useRef(0);
+  const foreground = useRef(AppState.currentState === 'active');
+  const callbacks = useRef({ onComplete, onError, trackEvent });
 
   useEffect(() => {
-    callbacks.current = { onComplete, onFallback, onAlarmAudibleChange, trackEvent };
-  }, [onAlarmAudibleChange, onComplete, onFallback, trackEvent]);
+    callbacks.current = { onComplete, onError, trackEvent };
+  }, [onComplete, onError, trackEvent]);
 
   useEffect(() => {
     if (!active) return undefined;
     let mounted = true;
-    const config = WAKE_CHALLENGE_CONFIG.yell;
-    scale.setValue(1);
+    foreground.current = AppState.currentState === 'active';
+    finished.current = false;
+    attemptsRef.current = 0;
+    setStatus('ready');
+    setMessage('');
+    setAttempts(0);
     startedAt.current = Date.now();
-    lastProgressAt.current = startedAt.current;
-    latestState.current = null;
-    samples.current = [];
-    meterStartedAt.current = 0;
-    lastMeterEventAt.current = 0;
-    calibrationStartedAt.current = 0;
-    scorePausedUntil.current = 0;
-    finishOnce.current = false;
-    lastMilestone.current = 0;
-    calibratingRef.current = true;
-    alarmAudibleRef.current = false;
-    const fallback = (reason: string) => {
-      if (finishOnce.current || !mounted) return;
-      finishOnce.current = true;
-      callbacks.current.trackEvent('challenge_fallback_used', {
-        type: 'yell',
-        mode,
-        duration_ms: Date.now() - startedAt.current,
-        attempts: 1,
-        reason,
-        preview,
-      });
-      callbacks.current.onFallback(reason, { durationMs: Date.now() - startedAt.current, attempts: 1 });
-    };
-    const changeAlarmAudible = async (audible: boolean) => {
-      try {
-        await callbacks.current.onAlarmAudibleChange?.(audible);
-      } catch (error) {
-        console.error('Alarm audio could not be adjusted for Yell to Wake.', error);
-        fallback('alarm_audio_unavailable');
-      }
-    };
 
-    const complete = async () => {
-      if (finishOnce.current || !mounted) return;
-      finishOnce.current = true;
-      const durationMs = Date.now() - startedAt.current;
-      const finalPower = latestState.current?.peakPower ?? powerRef.current;
-      setSuccess(true);
-      setPower(finalPower);
+    const resultSubscription = addAlarmListener('speechResult', (event) => {
+      if (!mounted || !foreground.current || !('recognized' in event) || finished.current) return;
+      if (!event.recognized) {
+        setStatus('ready');
+        setMessage(`We heard “${event.text || 'something'},” not “${phrase}.” Try again.`);
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+          .catch((error: unknown) => console.warn('Speech retry haptic failed.', error));
+        return;
+      }
+      finished.current = true;
+      setStatus('success');
+      setMessage('PHRASE VERIFIED');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
-        .catch((error: unknown) => console.warn('Yell challenge success haptic failed.', error));
-      Animated.sequence([
-        Animated.spring(scale, { toValue: 1.08, useNativeDriver: true, speed: 14, bounciness: 12 }),
-        Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 12, bounciness: 8 }),
-      ]).start();
+        .catch((error: unknown) => console.warn('Speech success haptic failed.', error));
       callbacks.current.trackEvent('challenge_completed', {
-        type: 'yell',
-        mode,
-        duration_ms: durationMs,
-        attempts: 1,
-        power: finalPower,
-        preview,
+        type: 'yell_to_stop',
+        phrase,
+        attempts: attemptsRef.current,
+        duration_ms: Date.now() - startedAt.current,
+        confidence: event.confidence,
       });
-      await new Promise((resolve) => setTimeout(resolve, config.successMomentMs));
-      if (mounted) callbacks.current.onComplete({ durationMs, attempts: 1, power: finalPower });
-    };
-
-    let subscription: { remove: () => void } | undefined;
-    let errorSubscription: { remove: () => void } | undefined;
-    const begin = async () => {
-      if (Platform.OS === 'web') {
-        fallback('resource_unavailable');
-        return;
-      }
-      const permission = await getRecordingPermissionsAsync();
-      if (!permission.granted) {
-        callbacks.current.trackEvent('challenge_permission_denied', {
-          type: 'yell',
-          mode,
-          duration_ms: 0,
-          attempts: 1,
-          preview,
+      setTimeout(() => {
+        if (mounted) callbacks.current.onComplete({
+          durationMs: Date.now() - startedAt.current,
+          attempts: attemptsRef.current,
+          power: Math.round(event.confidence * 100),
         });
-        fallback('permission_denied');
-        return;
-      }
-      await changeAlarmAudible(false);
-      if (finishOnce.current) return;
-      await setAudioModeAsync({
-        allowsRecording: true,
-        allowsBackgroundRecording: false,
-        playsInSilentMode: true,
-        shouldRouteThroughEarpiece: false,
-        interruptionMode: 'mixWithOthers',
-      });
-      subscription = addAlarmListener('microphoneLevel', (event) => {
-        if (!('dbfs' in event) || !mounted || finishOnce.current) return;
-        const now = Date.now();
-        lastMeterEventAt.current = now;
-        if (!latestState.current) {
-          if (calibrationStartedAt.current === 0) calibrationStartedAt.current = now;
-          samples.current.push(event.dbfs);
-          if (now - calibrationStartedAt.current < config.calibrationMs) return;
-          const calibratedState = createYellState(mode, median(samples.current), now);
-          latestState.current = calibratedState;
-          if (!calibratedState.targetReachable) {
-            fallback('room_too_loud');
-            return;
-          }
-          setCalibrating(false);
-          calibratingRef.current = false;
-          callbacks.current.trackEvent('challenge_started', {
-            type: 'yell',
-            mode,
-            duration_ms: 0,
-            attempts: 1,
-            preview,
-          });
-          return;
-        }
-
-        const previousProgress = latestState.current.progressMs;
-        const nextState = updateYellState(
-          latestState.current,
-          event.dbfs,
-          now,
-          alarmAudibleRef.current || now < scorePausedUntil.current,
-        );
-        latestState.current = nextState;
-        if (alarmAudibleRef.current) {
-          if (nextState.smoothedDbfs >= nextState.targetDbfs) {
-            setAlarmAudible(false);
-            alarmAudibleRef.current = false;
-            scorePausedUntil.current = now + config.alarmMuteSettleMs;
-            latestState.current = {
-              ...nextState,
-              smoothedDbfs: nextState.baselineDbfs,
-              aboveSince: null,
-            };
-            void changeAlarmAudible(false);
-          }
-          return;
-        }
-        if (now < scorePausedUntil.current) {
-          latestState.current = {
-            ...nextState,
-            smoothedDbfs: nextState.baselineDbfs,
-            aboveSince: null,
-          };
-          return;
-        }
-        const nextProgress = yellProgress(nextState);
-        setProgress(nextProgress);
-        const nextPower = powerScore(nextState.smoothedDbfs, nextState.baselineDbfs);
-        powerRef.current = nextPower;
-        setPower(nextPower);
-
-        if (nextState.progressMs > previousProgress) lastProgressAt.current = now;
-        for (const milestone of config.hapticMilestones) {
-          if (nextProgress >= milestone && lastMilestone.current < milestone) {
-            lastMilestone.current = milestone;
-            void Haptics.impactAsync(milestone === 100 ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Medium)
-              .catch((error: unknown) => console.warn('Yell challenge progress haptic failed.', error));
-          }
-        }
-        if (nextProgress >= 100) void complete();
-      });
-      errorSubscription = addAlarmListener('microphoneError', (event) => {
-        if ('reason' in event) fallback(event.reason || 'resource_unavailable');
-      });
-      lastMeterEventAt.current = Date.now();
-      await startMicrophoneMeter();
-      meterStartedAt.current = Date.now();
-      if (!mounted) await stopMicrophoneMeter();
-    };
-
-    void begin().catch((error: unknown) => {
-      console.error('Yell challenge microphone meter could not start.', error);
-      fallback('resource_unavailable');
+      }, 500);
     });
-
-    const timer = setInterval(() => {
-      if (!mounted || finishOnce.current) return;
-      const now = Date.now();
-      const elapsed = now - startedAt.current;
-      setElapsedMs(elapsed);
-      if (elapsed >= config.maxDurationMs) {
-        fallback('timeout');
-      } else if (meterStartedAt.current > 0
-        && now - lastMeterEventAt.current >= config.microphoneSilenceTimeoutMs) {
-        fallback('resource_unavailable');
-      } else if (!calibratingRef.current && !alarmAudibleRef.current && now - lastProgressAt.current >= config.noProgressAlarmMs) {
-        setAlarmAudible(true);
-        alarmAudibleRef.current = true;
-        void changeAlarmAudible(true);
-      }
-    }, config.timerTickMs);
-    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState !== 'active') fallback('app_backgrounded');
+    const errorSubscription = addAlarmListener('speechError', (event) => {
+      if (!mounted || !foreground.current || !('reason' in event) || finished.current) return;
+      setStatus('ready');
+      setMessage(event.reason);
+      callbacks.current.onError(event.reason);
+    });
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      foreground.current = state === 'active';
+      if (foreground.current || finished.current) return;
+      void stopSpeechRecognition().catch((error: unknown) => {
+        console.error('Speech recognition could not be paused in the background.', error);
+      });
+      setStatus('ready');
+      setMessage('Listening paused while Wayykup is in the background. Tap to continue when you return.');
     });
 
     return () => {
       mounted = false;
-      clearInterval(timer);
+      void stopSpeechRecognition().catch((error: unknown) => {
+        console.error('Speech recognition could not be stopped.', error);
+      });
+      resultSubscription.remove();
+      errorSubscription.remove();
       appStateSubscription.remove();
-      subscription?.remove();
-      errorSubscription?.remove();
-      void stopMicrophoneMeter().catch((error: unknown) => console.error('Yell challenge microphone could not stop.', error));
-      void setAudioModeAsync({
-        allowsRecording: false,
-        allowsBackgroundRecording: false,
-        playsInSilentMode: true,
-        interruptionMode: 'doNotMix',
-        shouldPlayInBackground: true,
-      }).catch((error: unknown) => console.error('Alarm audio mode could not be restored after Yell.', error));
-      callbacks.current.onAlarmAudibleChange?.(false);
     };
-  }, [active, mode, preview, scale]);
+  }, [active, phrase]);
 
-  const requestFallback = () => {
-    if (finishOnce.current) return;
-    Alert.alert('Switch challenge?', 'The selected fallback challenge will replace Yell to Wake for this alarm.', [
-      { text: 'Keep trying', style: 'cancel' },
-      { text: "Can't do this now", style: 'destructive', onPress: () => {
-        if (finishOnce.current) return;
-        finishOnce.current = true;
-        callbacks.current.trackEvent('challenge_fallback_used', {
-          type: 'yell',
-          mode,
-          duration_ms: Date.now() - startedAt.current,
-          attempts: 1,
-          reason: 'user_requested',
-          preview,
-        });
-        callbacks.current.onFallback('user_requested', { durationMs: Date.now() - startedAt.current, attempts: 1 });
-      } },
-    ]);
+  const beginListening = async () => {
+    if (!active || !foreground.current || status === 'listening' || finished.current) return;
+    setMessage('');
+    attemptsRef.current += 1;
+    setAttempts(attemptsRef.current);
+    setStatus('listening');
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        setStatus('ready');
+        setMessage('Allow microphone access in Settings, then retry.');
+        callbacks.current.onError('permission_denied');
+        return;
+      }
+      if (Platform.OS === 'web') throw new Error('On-device speech recognition is unavailable on web.');
+      await startSpeechRecognition(phrase);
+      callbacks.current.trackEvent('challenge_started', {
+        type: 'yell_to_stop',
+        phrase,
+        attempts: attemptsRef.current,
+        duration_ms: Date.now() - startedAt.current,
+      });
+    } catch (error) {
+      console.error('Yell to Stop speech recognition could not start.', error);
+      const reason = error instanceof Error ? error.message : 'Speech recognition could not start. Tap to retry.';
+      setStatus('ready');
+      setMessage(reason);
+      callbacks.current.onError(reason);
+    }
   };
 
   return (
     <View style={styles.challengePanel}>
-      <Text style={styles.challengeEyebrow}>{preview ? 'TRY IT NOW · MICROPHONE LEVEL ONLY' : 'YELL TO WAKE'}</Text>
-      <Text style={styles.challengePrompt}>{success ? 'WAKE-UP PROVED' : calibrating ? 'LISTENING TO YOUR ROOM' : alarmAudible ? 'YOUR TURN — GET LOUD' : 'SHOUT TO FILL THE METER'}</Text>
-      <Animated.View style={[styles.yellMeterOuter, { transform: [{ scale }] }]}>
-        <View style={[styles.yellMeterFill, { height: `${progress}%` }]} />
-        <View style={styles.yellTargetLine} />
-        <Text style={styles.yellMeterScore}>{String(success ? power : progress).padStart(2, '0')}</Text>
-        <Text style={styles.yellMeterCaption}>POWER</Text>
+      <Text style={styles.challengeEyebrow}>YELL TO STOP</Text>
+      <Text style={styles.challengePrompt}>TIME TO GET LOUD!</Text>
+      <Text style={styles.challengeHint}>Say “{phrase}” clearly to stop your alarm.</Text>
+      <Animated.View style={[styles.speechPhraseCard, status === 'success' && styles.speechPhraseCardSuccess]}>
+        <Text style={styles.speechPhraseText}>{phrase}</Text>
       </Animated.View>
-      <Text style={styles.challengeHint}>
-        {calibrating
-          ? 'Measuring room sound through the phone mic. Disconnect any headset. No audio is saved.'
-          : `Peak power ${power}/100 · ${Math.max(0, Math.ceil((WAKE_CHALLENGE_CONFIG.yell.maxDurationMs - elapsedMs) / 1000))}s left`}
-      </Text>
-      {!preview && (
-        <TouchableOpacity accessibilityRole="button" onPress={requestFallback} style={styles.challengeFallbackButton}>
-          <Text style={styles.challengeFallbackText}>CAN&apos;T DO THIS RIGHT NOW</Text>
+      <View accessibilityRole="progressbar" accessibilityLabel={status === 'listening' ? 'Listening for your phrase' : 'Microphone ready'} style={styles.speechWave}>
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((item) => (
+          <View
+            key={item}
+            style={[
+              styles.speechWaveBar,
+              status === 'listening' && { height: 12 + ((item * 7) % 17) },
+              status === 'success' && styles.speechWaveBarSuccess,
+            ]}
+          />
+        ))}
+      </View>
+      {!!message && <Text style={styles.challengeHint}>{message}</Text>}
+      {status !== 'success' && (
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityState={{ disabled: status === 'listening' }}
+          disabled={status === 'listening'}
+          onPress={() => { void beginListening(); }}
+          style={[styles.speechButton, status === 'listening' && styles.speechButtonListening]}
+        >
+          <Text style={styles.speechButtonText}>{status === 'listening' ? 'LISTENING…' : 'TAP TO SPEAK'}</Text>
         </TouchableOpacity>
       )}
+      <Text style={styles.challengeHint}>Background noise alone will not count. Your phrase is checked on this device.</Text>
     </View>
   );
 }

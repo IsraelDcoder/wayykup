@@ -14,6 +14,7 @@ import {
   weekDates,
 } from './logic';
 import { statsTheme as theme } from './theme';
+import { alarmSoundName } from '../alarmSounds';
 import type { DayResult, Occurrence, StatsPeriod, StreakFreeze } from './types';
 
 type Props = {
@@ -68,17 +69,11 @@ function resultColor(result: DayResult) {
 
 function challengeLabel(challenge: Occurrence['challenge']): string {
   switch (challenge) {
-    case 'math': return 'Math';
-    case 'shake': return 'Shake';
-    case 'qr': return 'QR scan';
-    case 'memory': return 'Memory';
+    case 'yell_to_stop': return 'Yell to Stop';
+    case 'push_up': return 'Push-up Challenge';
+    case 'shake_phone': return 'Shake Your Phone';
     case 'object_hunt': return 'Object Hunt';
-    case 'toothbrush': return 'Toothbrush';
-    case 'push_ups': return 'Push-ups';
-    case 'squats': return 'Squats';
-    case 'exercise': return 'Exercise';
-    case 'yell': return 'Yell to Wake';
-    case 'face': return 'Face Challenge';
+    case 'legacy': return 'Past challenge';
   }
 }
 
@@ -447,7 +442,7 @@ export function StatsScreen({
             <Text style={styles.sectionTitle}>Personal bests</Text>
             <BestRow title="Fastest wake-up" value={formatDuration(personalBests.fastestWake ? (personalBests.fastestWake.completedAt ?? 0) - (personalBests.fastestWake.firstRingAt ?? personalBests.fastestWake.completedAt ?? 0) : null)} />
             <BestRow title="Longest streak" value={`${personalBests.longestStreak} days`} />
-            <BestRow title="Hardest sound beaten" value={personalBests.hardestSound?.soundId.replaceAll('_', ' ') ?? '—'} detail={personalBests.hardestSound ? `${personalBests.hardestSound.tierReached} · ${personalBests.hardestSound.rearms} re-arms` : undefined} />
+            <BestRow title="Hardest sound beaten" value={personalBests.hardestSound ? alarmSoundName(personalBests.hardestSound.soundId) : '—'} detail={personalBests.hardestSound ? `${personalBests.hardestSound.tierReached} · ${personalBests.hardestSound.rearms} re-arms` : undefined} />
           </View>
 
           <View style={styles.card} accessibilityLabel="Challenge history">

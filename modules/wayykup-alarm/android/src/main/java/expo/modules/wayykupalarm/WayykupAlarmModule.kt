@@ -4,25 +4,142 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.Manifest
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.content.pm.PackageManager
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.label.ImageLabeling
 import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
+import com.google.mlkit.vision.pose.PoseDetection
+import com.google.mlkit.vision.pose.PoseDetector
+import com.google.mlkit.vision.pose.PoseDetectorOptions
+import com.google.mlkit.vision.pose.PoseLandmark
 import java.io.File
-import java.io.FileOutputStream
+import java.util.Locale
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
+private class SpeechPhraseRecognizer(
+  private val context: Context,
+  private val onResult: (Map<String, Any>) -> Unit,
+  private val onError: (String) -> Unit,
+) {
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var recognizer: SpeechRecognizer? = null
+  private var expectedPhrase = ""
+
+  fun start(phrase: String) {
+    require(phrase in setOf("I'M AWAKE!", "GOOD MORNING!", "I'M UP!", "WAKE UP!")) {
+      "Choose one of the supported wake-up phrases."
+    }
+    require(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+      "Allow microphone access to use Yell to Stop."
+    }
+    expectedPhrase = normalize(phrase)
+    mainHandler.post {
+      stopInternal()
+      if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+        onError("Speech recognition is unavailable on this device.")
+        return@post
+      }
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        || !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+      ) {
+        onError("On-device speech recognition is unavailable. Download an offline speech model in Settings and try again.")
+        return@post
+      }
+      val activeRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+      recognizer = activeRecognizer
+      activeRecognizer.setRecognitionListener(object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onBeginningOfSpeech() = Unit
+        override fun onRmsChanged(rmsdB: Float) = Unit
+        override fun onBufferReceived(buffer: ByteArray?) = Unit
+        override fun onEndOfSpeech() = Unit
+        override fun onPartialResults(partialResults: Bundle?) = Unit
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
+
+        override fun onResults(results: Bundle?) {
+          val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+          val scores = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+          val selected = matches.mapIndexed { index, text ->
+            text to (scores?.getOrNull(index)?.toDouble() ?: 0.0)
+          }.maxByOrNull { (_, score) -> score }
+          val text = selected?.first.orEmpty()
+          val confidence = selected?.second ?: 0.0
+          val recognized = confidence >= 0.35 && normalize(text) == expectedPhrase
+          onResult(mapOf("recognized" to recognized, "text" to text, "confidence" to confidence))
+          stopInternal()
+        }
+
+        override fun onError(error: Int) {
+          this@SpeechPhraseRecognizer.onError("Speech recognition failed (code $error). Tap to try again.")
+          stopInternal()
+        }
+      })
+      val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+      }
+      activeRecognizer.startListening(intent)
+    }
+  }
+
+  fun stop() {
+    mainHandler.post { stopInternal() }
+  }
+
+  private fun stopInternal() {
+    recognizer?.apply {
+      cancel()
+      destroy()
+    }
+    recognizer = null
+  }
+
+  private fun normalize(text: String): String =
+    text.lowercase(Locale.US)
+      .replace("i'm", "im")
+      .replace("i am", "im")
+      .replace(Regex("[^a-z0-9]+"), " ")
+      .trim()
+}
+
+private fun cachedCameraFile(context: Context, uri: Uri): File? {
+  val path = uri.path ?: return null
+  val file = File(path).canonicalFile
+  val cachePrefix = context.cacheDir.canonicalPath + File.separator
+  return file.takeIf { it.path.startsWith(cachePrefix) }
+}
+
+private fun removeCachedCameraFile(file: File?) {
+  if (file != null && file.exists() && !file.delete()) {
+    Log.w("WayykupAlarm", "Could not remove temporary camera image ${file.name}.")
+  }
+}
+
 class WayykupAlarmModule : Module() {
   private var ringReceiver: BroadcastReceiver? = null
-  private var microphoneMeter: MicrophoneMeter? = null
+  private var speechPhraseRecognizer: SpeechPhraseRecognizer? = null
+  private var poseDetector: PoseDetector? = null
   private val imageLabeler by lazy { ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS) }
 
   override fun definition() = ModuleDefinition {
     Name("WayykupAlarm")
-    Events("ringStarted", "challengeCompleted", "healthChanged", "microphoneLevel", "microphoneError")
+    Events("ringStarted", "challengeCompleted", "healthChanged", "speechResult", "speechError")
 
     OnCreate {
       val receiver = object : BroadcastReceiver() {
@@ -44,9 +161,10 @@ class WayykupAlarmModule : Module() {
               "occurrenceId" to occurrenceId,
               "at" to intent.getLongExtra("at", System.currentTimeMillis()),
               "scheduledAt" to intent.getLongExtra("scheduledAt", 0L),
-              "challenge" to (intent.getStringExtra("challenge") ?: "math"),
-              "sound" to (intent.getStringExtra("sound") ?: "Air raid"),
-              "testAlarm" to intent.getBooleanExtra("testAlarm", false)
+              "challenge" to (intent.getStringExtra("challenge") ?: "Shake Your Phone"),
+              "sound" to (intent.getStringExtra("sound") ?: "police_siren"),
+              "testAlarm" to intent.getBooleanExtra("testAlarm", false),
+              "state" to (intent.getStringExtra("state") ?: "ringing")
             )
           )
         }
@@ -66,8 +184,10 @@ class WayykupAlarmModule : Module() {
     }
 
     OnDestroy {
-      microphoneMeter?.stop()
-      microphoneMeter = null
+      speechPhraseRecognizer?.stop()
+      speechPhraseRecognizer = null
+      poseDetector?.close()
+      poseDetector = null
       ringReceiver?.let { receiver ->
         try {
           appContext.reactContext?.unregisterReceiver(receiver)
@@ -81,57 +201,60 @@ class WayykupAlarmModule : Module() {
     AsyncFunction("schedule") { alarm: Map<String, Any?> ->
       AlarmScheduler.schedule(context(), alarm)
     }
-    AsyncFunction("classifyImage") { uri: String ->
-      val image = InputImage.fromFilePath(context(), Uri.parse(uri))
-      Tasks.await(imageLabeler.process(image))
-        .sortedByDescending { it.confidence }
-        .take(12)
-        .map { mapOf("label" to it.text, "confidence" to it.confidence.toDouble()) }
-    }
-    AsyncFunction("importSound") { uri: String, name: String ->
-      val appContext = context()
-      val sourceUri = Uri.parse(uri)
-      val resolver = appContext.contentResolver
-      val mimeType = resolver.getType(sourceUri)
-      if (mimeType != null && !mimeType.startsWith("audio/")) {
-        throw IllegalArgumentException("Choose an audio file to use as your alarm sound.")
-      }
-      val extension = name.substringAfterLast('.', "").lowercase()
-      if (extension !in setOf("mp3", "m4a", "aac", "wav", "ogg", "flac", "3gp", "opus")) {
-        throw IllegalArgumentException("Choose an MP3, M4A, AAC, WAV, OGG, FLAC, 3GP, or OPUS audio file.")
-      }
-      val soundDirectory = File(appContext.filesDir, "alarm_sounds").apply { mkdirs() }
-      val destination = File(soundDirectory, "${java.util.UUID.randomUUID()}.$extension")
+    AsyncFunction("classifyImage") { uri: String, target: String ->
+      require(target.isNotBlank()) { "Choose an object target before recognizing a photo." }
+      val imageUri = Uri.parse(uri)
+      val temporaryFile = cachedCameraFile(context(), imageUri)
       try {
-        val input = resolver.openInputStream(sourceUri)
-          ?: throw IllegalArgumentException("Wayykup could not read the selected audio file.")
-        input.use { source ->
-          FileOutputStream(destination).use { target ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            var totalBytes = 0L
-            while (true) {
-              val bytesRead = source.read(buffer)
-              if (bytesRead < 0) break
-              totalBytes += bytesRead
-              if (totalBytes > MAX_SOUND_BYTES) {
-                throw IllegalArgumentException("Choose an audio file smaller than 100 MB.")
-              }
-              target.write(buffer, 0, bytesRead)
-            }
-          }
-        }
-      } catch (error: Exception) {
-        destination.delete()
-        throw error
+        val image = InputImage.fromFilePath(context(), imageUri)
+        Tasks.await(imageLabeler.process(image))
+          .sortedByDescending { it.confidence }
+          .take(12)
+          .map { mapOf("label" to it.text, "confidence" to it.confidence.toDouble()) }
+      } finally {
+        removeCachedCameraFile(temporaryFile)
       }
-      mapOf(
-        "uri" to Uri.fromFile(destination).toString(),
-        "name" to destination.name,
-        "displayName" to name.substringBeforeLast('.', name)
-      )
+    }
+    AsyncFunction("detectPushUpPose") { uri: String ->
+      val imageUri = Uri.parse(uri)
+      val temporaryFile = cachedCameraFile(context(), imageUri)
+      try {
+        val image = InputImage.fromFilePath(context(), imageUri)
+        val options = PoseDetectorOptions.Builder()
+          .setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
+          .build()
+        val detector = poseDetector ?: PoseDetection.getClient(options).also { poseDetector = it }
+        val pose = Tasks.await(detector.process(image))
+        val names = mapOf(
+          "leftShoulder" to PoseLandmark.LEFT_SHOULDER,
+          "leftElbow" to PoseLandmark.LEFT_ELBOW,
+          "leftWrist" to PoseLandmark.LEFT_WRIST,
+          "leftHip" to PoseLandmark.LEFT_HIP,
+          "leftAnkle" to PoseLandmark.LEFT_ANKLE,
+          "rightShoulder" to PoseLandmark.RIGHT_SHOULDER,
+          "rightElbow" to PoseLandmark.RIGHT_ELBOW,
+          "rightWrist" to PoseLandmark.RIGHT_WRIST,
+          "rightHip" to PoseLandmark.RIGHT_HIP,
+          "rightAnkle" to PoseLandmark.RIGHT_ANKLE,
+        )
+        names.mapNotNull { (name, type) ->
+          pose.getPoseLandmark(type)?.let { landmark ->
+            name to mapOf(
+              "x" to (landmark.position.x / image.width).toDouble(),
+              "y" to (landmark.position.y / image.height).toDouble(),
+              "confidence" to landmark.inFrameLikelihood.toDouble(),
+            )
+          }
+        }.toMap()
+      } finally {
+        removeCachedCameraFile(temporaryFile)
+      }
     }
     AsyncFunction("cancel") { alarmId: String ->
       AlarmScheduler.cancel(context(), alarmId, removeDefinition = true)
+    }
+    AsyncFunction("activateChallenge") { alarmId: String, occurrenceId: String ->
+      AlarmStore.activateChallenge(context(), alarmId, occurrenceId)
     }
     AsyncFunction("rearm") { alarmId: String, delaySeconds: Double ->
       val delayMs = (delaySeconds * 1000).toLong().coerceIn(60_000L, 300_000L)
@@ -143,11 +266,14 @@ class WayykupAlarmModule : Module() {
           .putExtra(AlarmContract.EXTRA_DELAY_MS, delayMs)
       )
     }
-    AsyncFunction("cancelChain") { alarmId: String, status: String ->
+    AsyncFunction("cancelChain") { alarmId: String, status: String, occurrenceId: String ->
+      require(status == "completed") { "Only a successfully completed challenge can dismiss an alarm." }
       val ring = AlarmStore.getPendingRing(context())
-      AlarmScheduler.cancelChain(context(), alarmId)
-      val occurrenceId = ring?.get("occurrenceId") as? String
-      if (occurrenceId != null) OccurrenceWriter.resolve(context(), occurrenceId, status)
+      require(ring?.get("occurrenceId") == occurrenceId) {
+        "The active alarm occurrence does not match the completed challenge."
+      }
+      AlarmScheduler.cancelChain(context(), alarmId, occurrenceId)
+      OccurrenceWriter.resolve(context(), occurrenceId, status)
       if (ring?.get("testAlarm") == true) {
         if (status == "completed") AlarmStore.markTestAlarmPassed(context())
         AlarmStore.removeAlarm(context(), alarmId)
@@ -158,7 +284,6 @@ class WayykupAlarmModule : Module() {
           .putExtra("alarmId", alarmId)
           .putExtra("occurrenceId", occurrenceId)
       )
-      AlarmStore.clearPendingRing(context())
     }
     AsyncFunction("getHealth") {
       AlarmHealth.get(context())
@@ -170,7 +295,10 @@ class WayykupAlarmModule : Module() {
       AlarmHealth.openSettings(context(), kind)
     }
     AsyncFunction("getPendingChallenge") {
-      AlarmStore.getPendingRing(context())
+      AlarmStore.getPendingRing(context())?.takeIf {
+        it["snoozed"] != true
+          && (it["state"] as? String) in setOf("ringing", "challenge_pending", "challenge_active")
+      }
     }
     AsyncFunction("consumePendingChallenge") {
       AlarmStore.clearPendingRing(context())
@@ -178,17 +306,16 @@ class WayykupAlarmModule : Module() {
     AsyncFunction("startTestAlarm") {
       AlarmScheduler.scheduleTest(context())
     }
-    AsyncFunction("startMicrophoneMeter") {
-      val meter = microphoneMeter ?: MicrophoneMeter(
+    AsyncFunction("startSpeechRecognition") { phrase: String ->
+      val speech = speechPhraseRecognizer ?: SpeechPhraseRecognizer(
         context(),
-        { dbfs -> sendEvent("microphoneLevel", mapOf("dbfs" to dbfs)) },
-        { sendEvent("microphoneError", mapOf("reason" to "resource_unavailable")) }
-      ).also { microphoneMeter = it }
-      meter.start()
+        { result -> sendEvent("speechResult", result) },
+        { reason -> sendEvent("speechError", mapOf("reason" to reason)) }
+      ).also { speechPhraseRecognizer = it }
+      speech.start(phrase)
     }
-    AsyncFunction("stopMicrophoneMeter") {
-      microphoneMeter?.stop()
-      microphoneMeter = null
+    AsyncFunction("stopSpeechRecognition") {
+      speechPhraseRecognizer?.stop()
     }
     AsyncFunction("setAlarmAudioDucked") { ducked: Boolean, fadeDurationMs: Double ->
       context().startService(
@@ -198,12 +325,18 @@ class WayykupAlarmModule : Module() {
           .putExtra(RingService.EXTRA_AUDIO_FADE_DURATION_MS, fadeDurationMs.toLong())
       )
     }
+    AsyncFunction("setAlarmVolumeTier") { tier: Int ->
+      context().startService(
+        Intent(context(), RingService::class.java)
+          .setAction(RingService.ACTION_SET_VOLUME_TIER)
+          .putExtra(RingService.EXTRA_VOLUME_TIER, tier.coerceIn(0, 3))
+      )
+    }
   }
 
   private fun context(): Context =
     appContext.reactContext ?: throw IllegalStateException("React application context is unavailable")
 
   private companion object {
-    const val MAX_SOUND_BYTES = 100L * 1024 * 1024
   }
 }

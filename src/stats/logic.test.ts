@@ -30,7 +30,7 @@ function occurrence(
     firstRingAt: status === 'skipped' ? null : scheduledAt,
     completedAt: status === 'completed' ? scheduledAt + 60_000 : null,
     status,
-    challenge: 'math',
+    challenge: 'yell_to_stop',
     difficulty: 2,
     tierReached: 'gentle',
     failedAttempts: 0,

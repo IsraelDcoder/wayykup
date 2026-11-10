@@ -13,7 +13,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
   Platform,
@@ -33,12 +32,14 @@ import ReanimatedAnimated, {
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import { requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer } from 'expo-audio';
-import * as DocumentPicker from 'expo-document-picker';
+import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
-import Purchases, { type CustomerInfo } from 'react-native-purchases';
+import Purchases, {
+  type CustomerInfo,
+  type PurchasesOffering,
+} from 'react-native-purchases';
 import { isPurchasesError, PURCHASES_ERROR_CODE } from 'react-native-purchases';
 import {
   initializeAnalytics,
@@ -48,6 +49,7 @@ import {
   persistAppProgress,
   loadKeepAlarmPlayingPreference,
   persistKeepAlarmPlayingPreference,
+  type AlarmRecord,
   requestAlarmNotifications,
   syncAlarmNotifications,
   getAlarmHealth,
@@ -59,17 +61,20 @@ import {
   addAlarmListener,
   cancelChain as cancelNativeAlarmChain,
   classifyImage,
+  activateChallenge as activateNativeChallenge,
   getPendingChallenge,
-  importSound as importAlarmSound,
   isNativeAlarmAvailable,
-  rearm as rearmNativeAlarm,
   setAlarmAudioDucked,
+  setAlarmVolumeTier,
+  schedule as scheduleNativeAlarm,
   startTestAlarm,
   type AlarmHealth,
   type RingStartedEvent,
 } from './modules/wayykup-alarm';
 import { StatsScreen } from './src/stats/StatsScreen';
 import { StreakMoment } from './src/stats/StreakMoment';
+import { ALARM_SOUNDS, alarmSoundAsset, alarmSoundName } from './src/alarmSounds';
+import { DEFAULT_ALARM_SOUND_ID, migrateAlarmSoundId } from './src/alarmSoundIds';
 import { WayykupIcon } from './src/components/WayykupIcon';
 import {
   calculateStreaks,
@@ -86,8 +91,6 @@ import {
   materializeOccurrences,
   reconcileOccurrences,
   recordFailedAttempt,
-  recordRearm,
-  resolveOccurrence,
   setMorningRating,
   spendFreeze,
   usedFreezeDates,
@@ -95,116 +98,64 @@ import {
 import { registerOccurrenceReconciliationTask } from './src/stats/background';
 import type { Occurrence, StreakFreeze } from './src/stats/types';
 import { OnboardingFlow, type OnboardingSetup } from './src/OnboardingFlow';
-import { chooseHuntTarget, HUNT_ITEMS, matchesHuntObject } from './src/challenges/objects';
-import { FaceChallenge } from './src/challenges/FaceChallenge';
+import {
+  chooseHuntTargetForDifficulty,
+  huntTargetsForDifficulty,
+  HUNT_ITEMS,
+  matchesHuntObject,
+} from './src/challenges/objects';
+import { PushUpChallenge } from './src/challenges/PushUpChallenge';
 import { YellChallenge } from './src/challenges/YellChallenge';
-import { WAKE_CHALLENGE_CONFIG } from './src/challenges/config';
-import type { YellMode } from './src/challenges/yellMachine';
+import { createShakeState, updateShakeState } from './src/challenges/shakeMachine';
+import {
+  CHALLENGE_OPTIONS,
+  challengeTypeForTask,
+  defaultChallengeConfiguration,
+  isChallengeConfiguration,
+  type ChallengeConfiguration,
+  type ChallengeTask,
+} from './src/challenges/registry';
 import { GlassNavigationBar } from './src/components/GlassNavigationBar';
+import { transitionAlarmState, type AlarmLifecycleState } from './src/alarmLifecycle';
 
-type Task = 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats' | 'Yell to Wake' | 'Face Challenge';
-type FallbackTask = 'Math' | 'Memory';
-type MathDifficulty = 'Easy' | 'Medium' | 'Hard';
-type Screen = 'welcome' | 'proof' | 'paywall' | 'home' | 'editor' | 'alarm' | 'stats' | 'streak' | 'settings';
-type PaywallStage = 'intro' | 'reminder' | 'timeline' | 'gift' | 'discount';
-type Alarm = {
-  id: string;
-  time: string;
-  task: Task;
-  days: string[];
-  sound: string;
-  customSoundUri?: string;
-  customSoundName?: string;
-  enabled: boolean;
-  savage: boolean;
-  qrCode?: string;
-  huntItems?: string[];
-  huntTarget?: string;
-  mathDifficulty: MathDifficulty;
-  shakeCount: number;
-  yellMode?: YellMode;
-  fallbackTask?: FallbackTask;
-};
+type Task = ChallengeTask;
+type Screen = 'welcome' | 'proof' | 'paywall' | 'home' | 'editor' | 'ringing' | 'alarm' | 'wakeSuccess' | 'stats' | 'streak' | 'settings';
+type PaywallStage = 'intro' | 'reminder' | 'timeline' | 'gift';
+type Alarm = AlarmRecord;
+type ActiveAlarm = Alarm & { task: Task; challengeConfig: ChallengeConfiguration };
+
+function alarmsWithSelectedChallenges(alarms: Alarm[]): Array<Alarm & { task: Task }> {
+  return alarms.filter((alarm): alarm is Alarm & { task: Task } =>
+    alarm.task !== null && alarm.challengeConfig !== undefined,
+  );
+}
 
 const RED = '#FF1717';
 const INK = '#171717';
 const MUTED = '#77736F';
 const PAPER = '#F7F7F9';
 const DAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-const TASKS: { name: Task; icon: string; detail: string }[] = [
-  { name: 'Object Hunt', icon: '⌕', detail: 'Find an object and take a photo' },
-  { name: 'Toothbrush', icon: '▰', detail: 'Brush for two minutes' },
-  { name: 'Push-ups', icon: '↗', detail: 'Complete ten controlled reps' },
-  { name: 'Squats', icon: '↘', detail: 'Complete ten controlled reps' },
-  { name: 'Math', icon: '∑', detail: 'Solve a problem to wake up' },
-  { name: 'Yell to Wake', icon: '◉', detail: 'Raise your voice to fill the power meter' },
-  { name: 'Face Challenge', icon: '◉', detail: 'Complete a random gesture sequence' },
-  { name: 'Shake', icon: '↯', detail: 'Shake it off. No shortcuts.' },
-  { name: 'QR scan', icon: '▦', detail: 'Get up and scan your code' },
-  { name: 'Memory', icon: '▤', detail: 'Repeat the sequence' },
-];
-const EXERCISE_REP_TARGET = 10;
-const BRUSHING_DURATION_SECONDS = 120;
-const MATH_CHALLENGES: Record<MathDifficulty, { equation: string; answer: number }> = {
-  Easy: { equation: '12 + 19', answer: 31 },
-  Medium: { equation: '78 × 4 + 12', answer: 324 },
-  Hard: { equation: '136 × 7 − 44', answer: 908 },
-};
-const SOUNDS = [
-  'Dread Siren',
-  'Panic Engine',
-  'Nightmare',
-  'Final Warning',
-  'Beacon',
-  'Buzz Saw',
-  'Kitchen Phone',
-  'Pulse',
-  'Air Raid',
-  'Honk',
-  'Inferno',
-  'Redline',
-  'Bugle Call',
-  'Countdown',
-  'Jackhammer',
-  'Warpath',
-];
-const SOUND_ASSETS: Record<string, number> = {
-  'Dread Siren': require('./assets/dread-siren.wav'),
-  'Panic Engine': require('./assets/panic-engine.wav'),
-  Nightmare: require('./assets/nightmare.wav'),
-  'Final Warning': require('./assets/final-warning.wav'),
-  'Air raid': require('./assets/alarm-tone.wav'),
-  'Bugle call': require('./assets/bugle-call.wav'),
-  Redline: require('./assets/redline.wav'),
-  Beacon: require('./assets/beacon.wav'),
-  'Buzz Saw': require('./assets/buzz-saw.wav'),
-  'Kitchen Phone': require('./assets/kitchen-phone.wav'),
-  Pulse: require('./assets/pulse.wav'),
-  'Air Raid': require('./assets/alarm-tone.wav'),
-  Honk: require('./assets/honk.wav'),
-  Inferno: require('./assets/inferno.wav'),
-  'Bugle Call': require('./assets/bugle-call.wav'),
-  Countdown: require('./assets/countdown.wav'),
-  Jackhammer: require('./assets/jackhammer.wav'),
-  Warpath: require('./assets/warpath.wav'),
-};
+const TASKS = CHALLENGE_OPTIONS;
 const REVENUECAT_API_KEY = Platform.OS === 'ios'
-  ? process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY
+  ? 'appl_hziHOEqZqnXMyxzQqPTrvjVWRlp'
   : process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_KEY;
 const MIXPANEL_TOKEN = process.env.EXPO_PUBLIC_MIXPANEL_TOKEN;
-const DISCOUNT_PACKAGE_ID = process.env.EXPO_PUBLIC_REVENUECAT_DISCOUNT_PACKAGE_ID;
 const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
 
 const starterAlarms: Alarm[] = [
-  { id: 'alpha', time: '06:45', task: 'Math', days: ['0', '1', '2', '3', '4'], sound: 'Air raid', enabled: true, savage: true, mathDifficulty: 'Hard', shakeCount: 100 },
-  { id: 'bravo', time: '05:30', task: 'Shake', days: ['0', '1', '2', '3', '4'], sound: 'Bugle call', enabled: true, savage: false, mathDifficulty: 'Easy', shakeCount: 100 },
-  { id: 'charlie', time: '09:00', task: 'QR scan', days: [], sound: 'Redline', enabled: false, savage: false, mathDifficulty: 'Easy', shakeCount: 100 },
+  { id: 'alpha', time: '06:45', task: 'Object Hunt', days: ['0', '1', '2', '3', '4'], sound: DEFAULT_ALARM_SOUND_ID, enabled: true, savage: true, challengeConfig: { type: 'object_hunt', difficulty: 'easy', targetObject: 'Toothbrush' } },
+  { id: 'bravo', time: '05:30', task: 'Shake Your Phone', days: ['0', '1', '2', '3', '4'], sound: 'air_raid', enabled: true, savage: false, challengeConfig: { type: 'shake_phone', targetCount: 25 } },
 ];
 
 function formatClock12Hour(time: string) {
   const [hour, minute] = time.split(':').map(Number);
   const suffix = hour >= 12 ? 'PM' : 'AM';
   return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+function formatBillingPeriod(value: number, unit: string) {
+  const normalizedUnit = unit.toLowerCase();
+  return `${value} ${normalizedUnit}${value === 1 ? '' : 's'}`;
 }
 
 function formatDigitalClock(date: Date) {
@@ -237,22 +188,27 @@ function nextAlarmCountdown(alarm: Alarm, now: Date) {
   return repeatLabel(alarm.days);
 }
 
-function taskLabel(task: Task, alarm?: Alarm) {
+function taskLabel(task: Task | null, alarm?: Alarm) {
+  const config = alarm?.challengeConfig;
   switch (task) {
-    case 'Math': return `Math ${alarm?.mathDifficulty ?? 'Medium'}`;
-    case 'Shake': return `Shake ${alarm?.shakeCount ?? 100}`;
-    case 'QR scan': return 'QR Scan';
-    case 'Memory': return 'Memory';
+    case null: return 'Choose a wake-up challenge';
+    case 'Shake Your Phone': return `Shake Your Phone · ${config?.type === 'shake_phone' ? config.targetCount : 25}`;
     case 'Object Hunt': return 'Object Hunt';
-    case 'Toothbrush': return 'Toothbrush';
-    case 'Push-ups': return `Push-ups · ${EXERCISE_REP_TARGET} reps`;
-    case 'Squats': return `Squats · ${EXERCISE_REP_TARGET} reps`;
-    case 'Yell to Wake': return `Yell to Wake · ${(alarm?.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode).toUpperCase()}`;
-    case 'Face Challenge': return 'Face Challenge · 3 gestures';
+    case 'Push-up Challenge': return `Push-up Challenge · ${config?.type === 'push_up' ? config.targetCount : 10} reps`;
+    case 'Yell to Stop': return 'Yell to Stop';
   }
 }
-function taskIcon(task: Task) {
-  return TASKS.find((item) => item.name === task)?.icon ?? '∑';
+
+function challengeConfigurationForAlarm(alarm: Pick<Alarm, 'task' | 'challengeConfig'>): ChallengeConfiguration | undefined {
+  const type = challengeTypeForTask(alarm.task);
+  if (!type) return undefined;
+  const config = alarm.challengeConfig;
+  return config?.type === type && isChallengeConfiguration(config)
+    ? config
+    : defaultChallengeConfiguration(type);
+}
+function taskIcon(task: Task | null) {
+  return TASKS.find((item) => item.task === task)?.icon ?? '!';
 }
 
 function ActionButton({
@@ -304,16 +260,50 @@ function ObjectHuntCamera({
   target,
   onRecognized,
   onFailedAttempt,
+  cameraReadyMessage,
 }: {
   target: string;
   onRecognized: (target: string) => void;
   onFailedAttempt: () => void;
+  cameraReadyMessage: string;
 }) {
   const cameraRef = useRef<CameraView | null>(null);
   const captureInProgress = useRef(false);
+  const captureGeneration = useRef(0);
+  const scanProgress = useRef(new Animated.Value(0)).current;
   const [cameraReady, setCameraReady] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [message, setMessage] = useState('');
+  const [hasAttempted, setHasAttempted] = useState(false);
+
+  useEffect(() => () => {
+    captureGeneration.current += 1;
+    captureInProgress.current = false;
+  }, []);
+
+  useEffect(() => {
+    captureGeneration.current += 1;
+    captureInProgress.current = false;
+    setCapturing(false);
+    setMessage('');
+    setHasAttempted(false);
+  }, [target]);
+
+  useEffect(() => {
+    if (!capturing) {
+      scanProgress.stopAnimation();
+      scanProgress.setValue(0);
+      return undefined;
+    }
+    const scan = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scanProgress, { toValue: 1, duration: 1100, useNativeDriver: true }),
+        Animated.timing(scanProgress, { toValue: 0, duration: 0, useNativeDriver: true }),
+      ]),
+    );
+    scan.start();
+    return () => scan.stop();
+  }, [capturing, scanProgress]);
 
   const capture = useCallback(async () => {
     if (captureInProgress.current) return;
@@ -329,49 +319,274 @@ function ObjectHuntCamera({
     captureInProgress.current = true;
     setCapturing(true);
     setMessage('CHECKING OBJECT…');
+    const generation = captureGeneration.current;
     try {
       const photo = await camera.takePictureAsync({ quality: 0.7 });
-      const predictions = await classifyImage(photo.uri);
+      if (generation !== captureGeneration.current) return;
+      setHasAttempted(true);
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      let predictions: Awaited<ReturnType<typeof classifyImage>>;
+      try {
+        predictions = await Promise.race([
+          classifyImage(photo.uri, target),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('Object recognition timed out.')), 15_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      if (generation !== captureGeneration.current) return;
       if (matchesHuntObject(target, predictions)) {
         onRecognized(target);
       } else {
         onFailedAttempt();
-        const label = predictions[0]?.label;
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+          .catch((error: unknown) => console.warn('Object-recognition retry haptic failed:', error));
         setMessage(
-          label
-            ? `NOT RECOGNIZED · WAYYKUP SAW ${label.toUpperCase()}. TRY AGAIN.`
-            : 'OBJECT NOT RECOGNIZED · MOVE CLOSER AND TRY AGAIN.',
+          `${target.toUpperCase()} NOT DETECTED. MOVE CLOSER, CENTRE IT, AND RETAKE THE PHOTO.`,
         );
       }
     } catch (error) {
+      if (generation !== captureGeneration.current) return;
       console.error('Object Hunt image recognition failed.', error);
-      setMessage('RECOGNITION FAILED · CHECK THE LIGHTING AND TRY AGAIN.');
+      setMessage('WE COULD NOT CHECK THAT PHOTO. CHECK THE LIGHTING AND RETRY.');
     } finally {
-      captureInProgress.current = false;
-      setCapturing(false);
+      if (generation === captureGeneration.current) {
+        captureInProgress.current = false;
+        setCapturing(false);
+      }
     }
   }, [cameraReady, onFailedAttempt, onRecognized, target]);
 
   return (
     <>
-      <CameraView
-        ref={cameraRef}
-        style={styles.alarmCamera}
-        onCameraReady={() => setCameraReady(true)}
-      />
+      <View style={styles.huntViewfinder}>
+        <CameraView
+          ref={cameraRef}
+          style={styles.huntCameraPreview}
+          onCameraReady={() => setCameraReady(true)}
+        />
+        <View pointerEvents="none" style={styles.huntViewfinderOverlay}>
+          <View style={[styles.huntCorner, styles.huntCornerTopLeft]} />
+          <View style={[styles.huntCorner, styles.huntCornerTopRight]} />
+          <View style={[styles.huntCorner, styles.huntCornerBottomLeft]} />
+          <View style={[styles.huntCorner, styles.huntCornerBottomRight]} />
+          <View style={styles.huntAimGuide}>
+            <Text style={styles.huntAimGuideText}>CENTER THE OBJECT</Text>
+          </View>
+          {capturing && (
+            <Animated.View
+              style={[
+                styles.huntScanLine,
+                { transform: [{ translateY: scanProgress.interpolate({ inputRange: [0, 1], outputRange: [8, 184] }) }] },
+              ]}
+            />
+          )}
+          <View style={styles.huntCameraStatus}>
+            <View style={[styles.huntCameraStatusDot, cameraReady && styles.huntCameraStatusDotReady]} />
+            <Text style={styles.huntCameraStatusText}>
+              {capturing ? 'IDENTIFYING TARGET' : cameraReady ? 'CAMERA READY' : 'STARTING CAMERA'}
+            </Text>
+          </View>
+        </View>
+      </View>
       <TouchableOpacity
         accessibilityRole="button"
-        accessibilityLabel={`Take a photo to recognize the ${target}`}
+        accessibilityLabel={capturing ? `Identifying the ${target}` : `Scan the ${target}`}
         disabled={!cameraReady || capturing}
+        activeOpacity={0.86}
         onPress={() => { void capture(); }}
-        style={[styles.objectCaptureButton, (!cameraReady || capturing) && styles.buttonDisabled]}
+        style={[styles.huntScanButton, (!cameraReady || capturing) && styles.huntScanButtonDisabled]}
       >
-        <Text style={styles.objectCaptureButtonText}>
-          {capturing ? 'IDENTIFYING OBJECT…' : 'TAKE PHOTO TO IDENTIFY'}
+        <Text style={styles.huntScanButtonIcon}>{capturing ? '◌' : '⌕'}</Text>
+        <Text style={styles.huntScanButtonText}>
+          {capturing ? 'SCANNING OBJECT…' : hasAttempted ? 'RETAKE & SCAN AGAIN' : 'SCAN OBJECT'}
         </Text>
       </TouchableOpacity>
-      {!!message && <Text style={styles.huntRecognitionMessage}>{message}</Text>}
+      {!!message && (
+        <View style={styles.huntRetryNotice}>
+          <Text style={styles.huntRetryIcon}>↻</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.huntRetryText}>{message}</Text>
+        </View>
+      )}
+      {!message && !!cameraReadyMessage && (
+        <Text accessibilityLiveRegion="polite" style={styles.huntPermissionMessage}>{cameraReadyMessage}</Text>
+      )}
     </>
+  );
+}
+
+function ObjectHuntScreen({
+  alarmTime,
+  alarmLabel,
+  target,
+  difficulty,
+  recognized,
+  permissionGranted,
+  permissionMessage,
+  onRequestPermission,
+  onRecognized,
+  onFailedAttempt,
+  onReshuffle,
+}: {
+  alarmTime: string;
+  alarmLabel?: string;
+  target: string;
+  difficulty: string;
+  recognized: boolean;
+  permissionGranted: boolean;
+  permissionMessage: string;
+  onRequestPermission: () => void;
+  onRecognized: (target: string) => void;
+  onFailedAttempt: () => void;
+  onReshuffle: () => void;
+}) {
+  const entrance = useRef(new Animated.Value(0)).current;
+  const successScale = useRef(new Animated.Value(0.82)).current;
+  const object = HUNT_ITEMS.find((item) => item.name === target);
+
+  useEffect(() => {
+    entrance.setValue(0);
+    Animated.spring(entrance, {
+      toValue: 1,
+      damping: 20,
+      stiffness: 110,
+      mass: 0.8,
+      useNativeDriver: true,
+    }).start();
+  }, [entrance, target]);
+
+  useEffect(() => {
+    if (!recognized) {
+      successScale.setValue(0.82);
+      return;
+    }
+    Animated.spring(successScale, {
+      toValue: 1,
+      damping: 11,
+      stiffness: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [recognized, successScale]);
+
+  const entranceStyle = {
+    opacity: entrance,
+    transform: [{ translateY: entrance.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
+  };
+
+  return (
+    <SafeAreaView style={styles.huntScreen}>
+      <ScrollView
+        contentContainerStyle={styles.huntScreenContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.huntMissionTop}>
+          <View style={styles.huntLiveIndicator}>
+            <View style={styles.huntLiveDot} />
+            <Text style={styles.huntLiveText}>ALARM ACTIVE</Text>
+          </View>
+          <Text style={styles.huntMissionEyebrow}>WAKE-UP MISSION</Text>
+          <Text style={styles.huntMissionTime}>{alarmTime}</Text>
+          {!!alarmLabel && <Text style={styles.huntAlarmLabel}>{alarmLabel}</Text>}
+          <Text style={styles.huntMissionMessage}>One mission between you and your morning.</Text>
+        </View>
+
+        <Animated.View style={[styles.huntChallengeHeading, entranceStyle]}>
+          <View style={styles.huntChallengeIcon}>
+            <Text style={styles.huntChallengeIconGlyph}>⌕</Text>
+          </View>
+          <View style={styles.huntChallengeHeadingCopy}>
+            <Text style={styles.huntChallengeTitle}>OBJECT HUNT</Text>
+            <Text style={styles.huntChallengeSubtitle}>Find it. Scan it. Get moving.</Text>
+          </View>
+        </Animated.View>
+
+        <Animated.View style={[styles.huntTargetCard, entranceStyle]}>
+          <View style={styles.huntTargetVisual}>
+            <Text style={styles.huntTargetArtwork}>{object?.image ?? '⌕'}</Text>
+            <View style={styles.huntDifficultyPill}>
+              <Text style={styles.huntDifficultyText}>{difficulty.toUpperCase()} MISSION</Text>
+            </View>
+          </View>
+          <View style={styles.huntTargetDetails}>
+            <Text style={styles.huntTargetEyebrow}>YOUR TARGET</Text>
+            <Text style={styles.huntTargetName}>{target.toUpperCase()}</Text>
+            <Text style={styles.huntTargetInstructions}>
+              Find this item, bring it into view, and scan it to prove you’re up.
+            </Text>
+            {!recognized && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Change target object"
+                onPress={onReshuffle}
+                style={styles.huntChangeTarget}
+              >
+                <Text style={styles.huntChangeTargetIcon}>↻</Text>
+                <Text style={styles.huntChangeTargetText}>CHANGE TARGET</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </Animated.View>
+
+        <View style={styles.huntScannerSection}>
+          <View style={styles.huntScannerHeader}>
+            <Text style={styles.huntScannerTitle}>OBJECT SCANNER</Text>
+            <Text style={styles.huntScannerStep}>STEP 1 OF 1</Text>
+          </View>
+          {recognized ? (
+            <View
+              accessibilityRole="summary"
+              accessibilityLabel={`Correct target ${target} recognized. Alarm completion is in progress.`}
+              style={styles.huntSuccessCard}
+            >
+              <Animated.View style={[styles.huntSuccessIcon, { transform: [{ scale: successScale }] }]}>
+                <Text style={styles.huntSuccessCheck}>✓</Text>
+              </Animated.View>
+              <Text style={styles.huntSuccessTitle}>TARGET VERIFIED</Text>
+              <Text style={styles.huntSuccessMessage}>{target} confirmed. Your morning starts now.</Text>
+            </View>
+          ) : permissionGranted ? (
+            <ObjectHuntCamera
+              target={target}
+              cameraReadyMessage={permissionMessage}
+              onRecognized={onRecognized}
+              onFailedAttempt={onFailedAttempt}
+            />
+          ) : (
+            <View style={styles.huntCameraPlaceholder}>
+              <View style={styles.huntPlaceholderIcon}>
+                <Text style={styles.huntPlaceholderGlyph}>⌕</Text>
+              </View>
+              <Text style={styles.huntPlaceholderTitle}>Ready when you are</Text>
+              <Text style={styles.huntPlaceholderMessage}>
+                Allow camera access to scan and verify your target on this device.
+              </Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                onPress={onRequestPermission}
+                style={styles.huntScanButton}
+              >
+                <Text style={styles.huntScanButtonIcon}>⌕</Text>
+                <Text style={styles.huntScanButtonText}>ENABLE CAMERA</Text>
+              </TouchableOpacity>
+              {!!permissionMessage && (
+                <Text accessibilityLiveRegion="polite" style={styles.huntPermissionMessage}>{permissionMessage}</Text>
+              )}
+            </View>
+          )}
+        </View>
+
+        <View style={styles.huntKeepRinging}>
+          <View style={styles.huntKeepRingingIcon}>
+            <Text style={styles.huntKeepRingingGlyph}>♫</Text>
+          </View>
+          <Text style={styles.huntKeepRingingText}>Your alarm keeps ringing until your target is verified.</Text>
+        </View>
+      </ScrollView>
+      <StatusBar barStyle="dark-content" />
+    </SafeAreaView>
   );
 }
 
@@ -830,6 +1045,13 @@ export default function App() {
   const [navIndicatorPosition] = useState(() => new Animated.Value(0));
   const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null);
   const [startupProgressLoaded, setStartupProgressLoaded] = useState(false);
+  const [startupProgressError, setStartupProgressError] = useState('');
+  const [progressRetryCount, setProgressRetryCount] = useState(0);
+  const [localAppUnlocked, setLocalAppUnlocked] = useState(false);
+  const [billingStatus, setBillingStatus] = useState<'loading' | 'ready' | 'error'>(
+    Platform.OS === 'web' ? 'ready' : REVENUECAT_API_KEY ? 'loading' : 'error',
+  );
+  const [billingRetryCount, setBillingRetryCount] = useState(0);
   const [alarms, setAlarms] = useState(starterAlarms);
   const [alarmsLoaded, setAlarmsLoaded] = useState(false);
   const [occurrences, setOccurrences] = useState<Occurrence[]>([]);
@@ -851,74 +1073,67 @@ export default function App() {
   const [openAlarmSwipeId, setOpenAlarmSwipeId] = useState<{ id: string; action: 'edit' | 'delete' } | null>(null);
   const [expandedEditorSection, setExpandedEditorSection] = useState<'sound' | 'task' | null>(null);
   const [challengePreviewing, setChallengePreviewing] = useState(false);
-  const [yellAlarmAudible, setYellAlarmAudible] = useState(false);
   const [alarmFallbackReason, setAlarmFallbackReason] = useState<string | null>(null);
   const [paywallStage, setPaywallStage] = useState<PaywallStage>('intro');
   const [draft, setDraft] = useState<Alarm>({
     id: '',
     time: '07:00',
-    task: 'Math',
+    task: 'Shake Your Phone',
     days: ['0', '1', '2', '3', '4'],
-    sound: SOUNDS[0],
+    sound: DEFAULT_ALARM_SOUND_ID,
     enabled: true,
     savage: false,
-    mathDifficulty: 'Medium',
-    shakeCount: 100,
-    yellMode: WAKE_CHALLENGE_CONFIG.yell.defaultMode,
-    fallbackTask: WAKE_CHALLENGE_CONFIG.fallbackTask,
+    challengeConfig: defaultChallengeConfiguration('shake_phone'),
   });
   const [now, setNow] = useState(() => new Date());
-  const [answer, setAnswer] = useState('');
   const [wrongAnswers, setWrongAnswers] = useState(0);
-  const [mathAttempts, setMathAttempts] = useState(0);
-  const [mathCorrect, setMathCorrect] = useState(0);
   const [shakeCount, setShakeCount] = useState(0);
-  const [exerciseReps, setExerciseReps] = useState(0);
-  const [brushingSeconds, setBrushingSeconds] = useState(BRUSHING_DURATION_SECONDS);
   const [sensorAvailable, setSensorAvailable] = useState(true);
-  const [linkingQr, setLinkingQr] = useState(false);
-  const [qrError, setQrError] = useState('');
-  const [activeHuntTarget, setActiveHuntTarget] = useState<string | null>(null);
-  const [shuffleDisplayTarget, setShuffleDisplayTarget] = useState<string | null>(null);
-  const [challengeShuffleVisible, setChallengeShuffleVisible] = useState(false);
   const [huntRecognized, setHuntRecognized] = useState(false);
   const [huntRecognitionMessage, setHuntRecognitionMessage] = useState('');
-  const [qrScanned, setQrScanned] = useState(false);
-  const [memoryEntry, setMemoryEntry] = useState('');
-  const [memorySequenceVisible, setMemorySequenceVisible] = useState(false);
   const [previewingSound, setPreviewingSound] = useState<string | null>(null);
   const [snoozeLevels, setSnoozeLevels] = useState<Record<string, number>>({});
   const [challengeDurationSeconds, setChallengeDurationSeconds] = useState(0);
   const [availablePackages, setAvailablePackages] = useState<Parameters<typeof Purchases.purchasePackage>[0][]>([]);
-  const [billingError, setBillingError] = useState('');
+  const [currentOffering, setCurrentOffering] = useState<PurchasesOffering | null>(null);
+  const [annualIntroEligible, setAnnualIntroEligible] = useState(false);
+  const [billingError, setBillingError] = useState(
+    Platform.OS !== 'web' && !REVENUECAT_API_KEY ? 'Subscriptions are not configured for this build.' : '',
+  );
   const [billingBusy, setBillingBusy] = useState(false);
   const [hasPremium, setHasPremium] = useState(false);
   const [plan, setPlan] = useState<'yearly' | 'monthly'>('yearly');
   const [plansModalVisible, setPlansModalVisible] = useState(false);
   const [currentPlanModalVisible, setCurrentPlanModalVisible] = useState(false);
-  const [lastAlarm, setLastAlarm] = useState<Alarm>(starterAlarms[0]);
+  const [lastAlarm, setLastAlarm] = useState<ActiveAlarm>(starterAlarms[0] as ActiveAlarm);
   const snoozeLevel = snoozeLevels[lastAlarm.id] ?? 0;
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const alarmPlayer = useAudioPlayer(require('./assets/alarm-tone.wav'));
-  const soundPreviewPlayer = useAudioPlayer(require('./assets/dread-siren.wav'));
+  const alarmPlayer = useAudioPlayer(alarmSoundAsset(DEFAULT_ALARM_SOUND_ID));
+  const soundPreviewPlayer = useAudioPlayer(alarmSoundAsset(DEFAULT_ALARM_SOUND_ID));
   const soundPreviewTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previousAcceleration = useRef<{ magnitude: number; timestamp: number; x: number; y: number; z: number } | null>(null);
-  const lastExerciseRepAt = useRef(0);
-  const exerciseMotionActive = useRef(false);
-  const brushingEndsAt = useRef(0);
+  const shakeDetectorState = useRef(createShakeState());
   const challengeCompleted = useRef(false);
+  const challengeTransitionInProgress = useRef(false);
+  const pendingChallengeResume = useRef<string | null>(null);
   const challengeStartedAt = useRef(0);
   const activeChallengeAlarmId = useRef<string | null>(null);
-  const activeYellAlarm = useRef(false);
   const activeOccurrenceId = useRef<string | null>(null);
   const activeRingStartedAt = useRef(0);
+  const startChallengeRef = useRef<(alarm?: Alarm, occurrenceId?: string | null, firstRingAt?: number, entryScreen?: 'ringing' | 'alarm') => void>(() => {});
+  const alarmSessionState = useRef<{ occurrenceId: string | null; state: AlarmLifecycleState }>({
+    occurrenceId: null,
+    state: 'scheduled',
+  });
   const alarmsRef = useRef(alarms);
   const pendingNotificationAlarmId = useRef<{ alarmId: string; occurrenceId: string } | null>(null);
   const lastNotificationResponse = useRef<{ id: string; receivedAt: number } | null>(null);
+  const revenueCatConfigured = useRef(false);
+  const premiumEntitlementRef = useRef(false);
   const screenEntrance = useRef(new Animated.Value(0)).current;
   const sheetTranslation = useRef(new Animated.Value(900)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const addButtonScale = useRef(new Animated.Value(1)).current;
+  const ringingSwipeX = useSharedValue(0);
 
   const refreshStats = useCallback(async (showLoading = false) => {
     if (showLoading) setStatsLoading(true);
@@ -1020,7 +1235,7 @@ export default function App() {
         if (alarmHealth?.canSchedule) {
           await syncAlarmNotifications(alarms);
         } else {
-          await materializeOccurrences(alarms);
+          await materializeOccurrences(alarmsWithSelectedChallenges(alarms));
         }
         await refreshStats();
       } catch (error) {
@@ -1054,9 +1269,15 @@ export default function App() {
     if (Platform.OS === 'web') return;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      void refreshAlarmHealth();
+      void refreshAlarmHealth().then((health) => {
+        if (Platform.OS !== 'ios' || !health?.canSchedule) return;
+        return syncAlarmNotifications(alarmsRef.current).catch((error: unknown) => {
+          console.error('iOS alarms could not be refreshed after returning to Wayykup.', error);
+          Alert.alert('Alarm refresh failed', 'Your saved alarms could not be rescheduled. Review alarm permissions and try again.');
+        });
+      });
       reconcileOccurrences()
-        .then(() => materializeOccurrences(alarmsRef.current))
+        .then(() => materializeOccurrences(alarmsWithSelectedChallenges(alarmsRef.current)))
         .then(() => refreshStats())
         .catch((error: unknown) => {
           console.error('Alarm history reconciliation failed on foreground.', error);
@@ -1071,23 +1292,13 @@ export default function App() {
     loadAlarms()
       .then((savedAlarms) => {
         if (active && savedAlarms) {
-          const isUnmodifiedStarterData = savedAlarms.length === 2
-            && savedAlarms[0].id === 'alpha'
-            && savedAlarms[0].time === '06:00'
-            && savedAlarms[0].task === 'Math'
-            && savedAlarms[0].mathDifficulty === 'Medium'
-            && savedAlarms[1].id === 'bravo'
-            && savedAlarms[1].time === '07:30'
-            && savedAlarms[1].task === 'Shake'
-            && !savedAlarms[1].enabled;
-          setAlarms(isUnmodifiedStarterData
-            ? starterAlarms
-            : savedAlarms.map((alarm) => ({
-              ...alarm,
-              shakeCount: alarm.shakeCount ?? 100,
-              yellMode: alarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
-              fallbackTask: alarm.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask,
-            })));
+          setAlarms(savedAlarms);
+          if (savedAlarms.some((alarm) => alarm.task === null)) {
+            Alert.alert(
+              'Choose a new wake-up challenge',
+              'Some saved alarms used retired challenges. Their times, repeat schedules, sounds, and labels are preserved; edit each flagged alarm and choose one of the four current challenges before it can ring.',
+            );
+          }
         }
       })
       .catch((error: unknown) => {
@@ -1105,32 +1316,46 @@ export default function App() {
     loadAppProgress()
       .then(async (progress) => {
         if (!active) return;
+        if (premiumEntitlementRef.current) {
+          const premiumProgress = { onboardingComplete: true, appUnlocked: true };
+          await persistAppProgress(premiumProgress);
+          setLocalAppUnlocked(true);
+          setScreen('home');
+          return;
+        }
+        setLocalAppUnlocked(progress?.appUnlocked ?? false);
         if (progress?.onboardingComplete) {
           setPaywallStage('intro');
-          setScreen('paywall');
+          setScreen(premiumEntitlementRef.current || progress.appUnlocked ? 'home' : 'paywall');
           return;
         }
 
         if (progress === null) {
           const savedAlarms = await loadAlarms();
           const completedOnboardingAlarm = savedAlarms?.some((alarm) => alarm.id.startsWith('onboarding-')) ?? false;
-          if (!active || !completedOnboardingAlarm) return;
+          if (!active) return;
+          if (!completedOnboardingAlarm) {
+            setLocalAppUnlocked(false);
+            return;
+          }
 
           const migratedProgress = { onboardingComplete: true, appUnlocked: false };
           await persistAppProgress(migratedProgress);
+          setLocalAppUnlocked(false);
           setPaywallStage('intro');
           setScreen('paywall');
+          return;
         }
       })
       .catch((error: unknown) => {
         console.error('Unable to restore app progress.', error);
-        Alert.alert('Progress unavailable', 'Wayykup could not restore your previous app progress. Your saved alarms remain available.');
+        if (active) setStartupProgressError('Wayykup could not restore your saved setup. Your existing alarm data has not been changed.');
       })
       .finally(() => {
         if (active) setStartupProgressLoaded(true);
       });
     return () => { active = false; };
-  }, []);
+  }, [progressRetryCount]);
 
   useEffect(() => {
     if (!alarmsLoaded) return;
@@ -1150,12 +1375,6 @@ export default function App() {
         Alert.alert('Alarm preference unavailable', 'The saved alarm playback choice could not be loaded.');
       });
   }, []);
-
-  useEffect(() => {
-    if (startupProgressLoaded && hasPremium && screen === 'paywall') {
-      setScreen('home');
-    }
-  }, [hasPremium, screen, startupProgressLoaded]);
 
   useEffect(() => {
     if (screen !== 'settings' || Platform.OS === 'web') return;
@@ -1184,53 +1403,125 @@ export default function App() {
   useEffect(() => {
     if (Platform.OS === 'web' || !REVENUECAT_API_KEY) return;
     let active = true;
-    try {
-      Purchases.configure({ apiKey: REVENUECAT_API_KEY });
-    } catch (error) {
-      console.error('RevenueCat could not be configured.', error);
-      setBillingError('Subscriptions are not configured for this build.');
-      return;
-    }
-    Promise.all([Purchases.getOfferings(), Purchases.getCustomerInfo()])
-      .then(([offerings, customerInfo]) => {
+    void Promise.resolve()
+      .then(async () => {
+        if (!revenueCatConfigured.current) {
+          await Purchases.setLogLevel(Purchases.LOG_LEVEL.DEBUG);
+          Purchases.configure({ apiKey: REVENUECAT_API_KEY });
+          revenueCatConfigured.current = true;
+        }
+        return Promise.allSettled([Purchases.getOfferings(), Purchases.getCustomerInfo()]);
+      })
+      .then(async ([offeringsResult, customerInfoResult]) => {
         if (!active) return;
-        setAvailablePackages(offerings.current?.availablePackages ?? []);
+        if (customerInfoResult.status === 'rejected') throw customerInfoResult.reason;
+        const customerInfo = customerInfoResult.value;
         setCustomerInfo(customerInfo);
         const isPremium = Boolean(customerInfo.entitlements.active.wayykup_premium);
+        premiumEntitlementRef.current = isPremium;
         setHasPremium(isPremium);
+
+        if (offeringsResult.status === 'rejected') {
+          console.error('😿 RevenueCat could not load subscription offerings.', offeringsResult.reason);
+          setCurrentOffering(null);
+          setAvailablePackages([]);
+          setAnnualIntroEligible(false);
+          setBillingError('Plans could not load. Check your connection and try again.');
+          setBillingStatus(isPremium ? 'ready' : 'error');
+          if (isPremium) {
+            setScreen((current) => ['welcome', 'proof', 'paywall'].includes(current) ? 'home' : current);
+            setLocalAppUnlocked(true);
+            void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
+              console.error('Premium app access could not be saved.', error);
+            });
+          }
+          return;
+        }
+
+        const offering = offeringsResult.value.current;
+        const annualPackage = offering?.annual ?? null;
+        const monthlyPackage = offering?.monthly ?? null;
+        setCurrentOffering(offering);
+        setAvailablePackages(offering?.availablePackages ?? []);
+        console.info(
+          '🍎 RevenueCat current offering:',
+          offering?.identifier ?? 'none',
+          'monthly:',
+          monthlyPackage?.product.identifier ?? 'missing',
+          'annual:',
+          annualPackage?.product.identifier ?? 'missing',
+        );
+
+        let introEligible = false;
+        if (Platform.OS === 'ios' && annualPackage?.product.introPrice) {
+          try {
+            const eligibility = await Purchases.checkTrialOrIntroductoryPriceEligibility([
+              'wayykup_pro_annual',
+            ]);
+            introEligible = eligibility.wayykup_pro_annual?.status
+              === Purchases.INTRO_ELIGIBILITY_STATUS.INTRO_ELIGIBILITY_STATUS_ELIGIBLE;
+            console.info('🍎 RevenueCat annual introductory offer eligible:', introEligible);
+          } catch (error) {
+            console.error('😿 RevenueCat introductory-price eligibility could not be checked.', error);
+          }
+        }
+        if (!active) return;
+        setAnnualIntroEligible(introEligible);
+
+        const plansLoaded = Boolean(offering && annualPackage && monthlyPackage);
+        if (plansLoaded) {
+          setBillingError('');
+        } else {
+          console.error('😿 RevenueCat current offering is missing an annual or monthly package.');
+          setBillingError('Plans could not load. Please retry or restore your purchase.');
+        }
+        setBillingStatus(isPremium || plansLoaded ? 'ready' : 'error');
         if (isPremium) {
-          void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
+          setScreen((current) => ['welcome', 'proof', 'paywall'].includes(current) ? 'home' : current);
+          const premiumProgress = { onboardingComplete: true, appUnlocked: true };
+          setLocalAppUnlocked(true);
+          void persistAppProgress(premiumProgress).catch((error: unknown) => {
             console.error('Premium app access could not be saved.', error);
           });
+        } else {
+          void loadAppProgress()
+            .then((progress) => {
+              if (!active || !progress?.appUnlocked) return;
+              const lockedProgress = { ...progress, appUnlocked: false };
+              setLocalAppUnlocked(false);
+              return persistAppProgress(lockedProgress);
+            })
+            .catch((error: unknown) => {
+              console.error('Expired app access could not be updated.', error);
+            });
         }
       })
       .catch((error: unknown) => {
-        console.error('RevenueCat could not load offerings or customer info.', error);
-        if (active) setBillingError('Plans are temporarily unavailable. Please try again later.');
+        console.error('😿 RevenueCat could not resolve offerings or subscription entitlement.', error);
+        if (active) {
+          setBillingStatus('error');
+          setBillingError('Wayykup could not verify your subscription. Check your connection and try again.');
+        }
       });
     return () => { active = false; };
-  }, []);
+  }, [billingRetryCount]);
 
   useEffect(() => {
-    if (screen !== 'alarm' && screen !== 'paywall') return;
+    if (screen !== 'alarm' && screen !== 'ringing' && screen !== 'paywall') return;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => true);
     return () => subscription.remove();
   }, [screen]);
 
   useEffect(() => {
-    if (!startupProgressLoaded || hasPremium || screen === 'welcome' || screen === 'proof' || screen === 'paywall') return;
-    setPaywallStage('intro');
-    setScreen('paywall');
-  }, [hasPremium, screen, startupProgressLoaded]);
-
-  useEffect(() => {
-    if (screen !== 'alarm') return;
-    if (activeOccurrenceId.current && isNativeAlarmAvailable && Platform.OS !== 'web') {
+    if (screen !== 'alarm' && screen !== 'ringing') return;
+    const nativeOwnsAlarmAudio = Platform.OS === 'android'
+      || (Platform.OS === 'ios' && alarmHealth?.reliability === 'native');
+    if (activeOccurrenceId.current && isNativeAlarmAvailable && nativeOwnsAlarmAudio) {
       alarmPlayer.pause();
       alarmPlayer.clearLockScreenControls();
       return;
     }
-    if (keepAlarmPlayingDuringChallenges === false) {
+    if (!activeOccurrenceId.current && keepAlarmPlayingDuringChallenges === false) {
       alarmPlayer.pause();
       alarmPlayer.clearLockScreenControls();
       return;
@@ -1243,14 +1534,12 @@ export default function App() {
     })
       .then(() => {
         if (!active) return;
-        alarmPlayer.replace(lastAlarm.customSoundUri ?? SOUND_ASSETS[lastAlarm.sound] ?? SOUND_ASSETS['Air raid']);
+        alarmPlayer.replace(alarmSoundAsset(lastAlarm.sound));
         alarmPlayer.loop = true;
-        alarmPlayer.volume = lastAlarm.task === 'Yell to Wake'
-          ? 0
-          : Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
+        alarmPlayer.volume = Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
         alarmPlayer.setActiveForLockScreen(
           true,
-          { title: 'WAYYKUP', artist: lastAlarm.customSoundName ?? lastAlarm.sound },
+          { title: 'WAYYKUP', artist: alarmSoundName(lastAlarm.sound) },
           { showSeekForward: false, showSeekBackward: false, showNextTrack: false, showPreviousTrack: false },
         );
         alarmPlayer.play();
@@ -1264,11 +1553,18 @@ export default function App() {
       alarmPlayer.pause();
       alarmPlayer.clearLockScreenControls();
     };
-  }, [screen, alarmPlayer, keepAlarmPlayingDuringChallenges, lastAlarm.customSoundUri, lastAlarm.sound, lastAlarm.task]);
+  }, [
+    alarmHealth?.reliability,
+    alarmPlayer,
+    keepAlarmPlayingDuringChallenges,
+    lastAlarm.sound,
+    lastAlarm.task,
+    screen,
+  ]);
 
   useEffect(() => {
     if (screen !== 'alarm') return;
-    if (lastAlarm.task === 'Yell to Wake') return;
+    if (lastAlarm.task === 'Yell to Stop') return;
     alarmPlayer.volume = Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1);
   }, [alarmPlayer, lastAlarm.task, screen, snoozeLevel, wrongAnswers]);
 
@@ -1279,70 +1575,42 @@ export default function App() {
     soundPreviewPlayer.pause();
   }, [screen, soundPreviewPlayer]);
 
-  useEffect(() => {
-    if (screen !== 'alarm' || lastAlarm.task !== 'Yell to Wake'
-      || (activeOccurrenceId.current && isNativeAlarmAvailable && Platform.OS !== 'web')
-      || keepAlarmPlayingDuringChallenges === false) return undefined;
-    const targetVolume = yellAlarmAudible
-      ? Math.min(1, 0.55 + (wrongAnswers + snoozeLevel) * 0.1)
-      : 0;
-    const startingVolume = alarmPlayer.volume;
-    const startedAt = Date.now();
-    const interval = setInterval(() => {
-      const progress = Math.min(1, (Date.now() - startedAt) / WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
-      const volume = startingVolume + (targetVolume - startingVolume) * progress;
-      alarmPlayer.volume = Math.max(0, Math.min(1, volume));
-      if (progress === 1) clearInterval(interval);
-    }, 40);
-    return () => clearInterval(interval);
-  }, [alarmPlayer, keepAlarmPlayingDuringChallenges, lastAlarm.task, screen, snoozeLevel, wrongAnswers, yellAlarmAudible]);
-
-  useEffect(() => {
-    if (screen !== 'alarm' || lastAlarm.task !== 'Memory') {
-      setMemorySequenceVisible(false);
-      return;
-    }
-    setMemorySequenceVisible(true);
-    const timer = setTimeout(() => setMemorySequenceVisible(false), 1800);
-    return () => clearTimeout(timer);
-  }, [lastAlarm.task, screen]);
-
   const nextAlarm = useMemo(
-    () => alarms.find((alarm) => alarm.enabled) ?? null,
+    () => alarms.find((alarm) => alarm.enabled && alarm.task !== null && alarm.challengeConfig) ?? null,
     [alarms],
   );
 
   useEffect(() => {
-    const isExercise = lastAlarm.task === 'Push-ups' || lastAlarm.task === 'Squats';
-    if (screen !== 'alarm' || (lastAlarm.task !== 'Shake' && !isExercise)) return;
-    previousAcceleration.current = null;
-    lastExerciseRepAt.current = 0;
-    exerciseMotionActive.current = false;
+    if (screen !== 'alarm' || lastAlarm.task !== 'Shake Your Phone') return;
+    shakeDetectorState.current = createShakeState();
+    setShakeCount(0);
     let active = true;
     let sensorSubscription: { remove: () => void } | undefined;
+    const targetCount = lastAlarm.challengeConfig.type === 'shake_phone'
+      ? lastAlarm.challengeConfig.targetCount
+      : 25;
     Accelerometer.isAvailableAsync()
       .then((available) => {
         if (!active) return;
         setSensorAvailable(available);
         if (!available) return;
         Accelerometer.setUpdateInterval(100);
-        const subscription = Accelerometer.addListener(({ x, y, z, timestamp }) => {
-          const magnitude = Math.sqrt(x * x + y * y + z * z);
-          const previous = previousAcceleration.current;
-          previousAcceleration.current = { magnitude, timestamp, x, y, z };
-          if (!previous || timestamp - previous.timestamp < 0.2) return;
-          if (!isExercise) {
-            if (Math.abs(magnitude - previous.magnitude) < 1.15) return;
-            setShakeCount((count) => Math.min(count + 1, lastAlarm.shakeCount));
-            return;
-          }
-
-          const movement = Math.sqrt((x - previous.x) ** 2 + (y - previous.y) ** 2 + (z - previous.z) ** 2);
-          if (movement < 0.07) exerciseMotionActive.current = false;
-          if (movement >= 0.2 && !exerciseMotionActive.current && timestamp - lastExerciseRepAt.current >= 0.85) {
-            exerciseMotionActive.current = true;
-            lastExerciseRepAt.current = timestamp;
-            setExerciseReps((count) => Math.min(count + 1, EXERCISE_REP_TARGET));
+        const subscription = Accelerometer.addListener(({ x, y, z }) => {
+          const previousCount = shakeDetectorState.current.count;
+          shakeDetectorState.current = updateShakeState(
+           shakeDetectorState.current,
+           { x, y, z },
+           Date.now(),
+           targetCount,
+          );
+          if (shakeDetectorState.current.count > previousCount) {
+           setShakeCount(shakeDetectorState.current.count);
+           if ([0.25, 0.5, 0.75, 1].some((milestone) =>
+             previousCount < Math.ceil(targetCount * milestone)
+             && shakeDetectorState.current.count >= Math.ceil(targetCount * milestone))) {
+             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)
+               .catch((error: unknown) => console.warn('Shake challenge milestone haptic failed.', error));
+           }
           }
         });
         sensorSubscription = subscription;
@@ -1355,7 +1623,7 @@ export default function App() {
       active = false;
       sensorSubscription?.remove();
     };
-  }, [lastAlarm.shakeCount, lastAlarm.task, screen]);
+  }, [lastAlarm.challengeConfig, lastAlarm.task, screen]);
 
   const beginAlarmTest = async () => {
     if (!isNativeAlarmAvailable) {
@@ -1392,20 +1660,13 @@ export default function App() {
     setDraft({
       id: '',
       time: '07:00',
-      task: 'Math',
+      task: 'Shake Your Phone',
       days: ['0', '1', '2', '3', '4'],
-      sound: SOUNDS[0],
+      sound: DEFAULT_ALARM_SOUND_ID,
       enabled: true,
       savage: false,
-      qrCode: '',
-      huntItems: ['Toothbrush'],
-      huntTarget: 'Toothbrush',
-      mathDifficulty: 'Medium',
-      shakeCount: 100,
-      yellMode: WAKE_CHALLENGE_CONFIG.yell.defaultMode,
-      fallbackTask: WAKE_CHALLENGE_CONFIG.fallbackTask,
+      challengeConfig: defaultChallengeConfiguration('shake_phone'),
     });
-    setLinkingQr(false);
     setChallengePreviewing(false);
     setExpandedEditorSection(null);
     setScreen('editor');
@@ -1416,7 +1677,6 @@ export default function App() {
     setPreviewingSound(null);
     setEditingId(alarm.id);
     setDraft({ ...alarm });
-    setLinkingQr(false);
     setExpandedEditorSection(null);
     setScreen('editor');
   };
@@ -1450,16 +1710,22 @@ export default function App() {
   };
 
   const saveAlarm = async () => {
-    const huntTargets = draft.huntItems?.length ? draft.huntItems : draft.huntTarget ? [draft.huntTarget] : [];
-    if (draft.task === 'Object Hunt' && !huntTargets.length) {
-      Alert.alert('Choose an object', 'Select at least one target object for Object Hunt before saving this challenge.');
+    if (!draft.task) {
+      Alert.alert(
+        'Choose a wake-up challenge',
+        'Select one of the four supported challenges before saving this alarm.',
+      );
+      setExpandedEditorSection('task');
       return;
     }
+    const config = challengeConfigurationForAlarm(draft);
+    if (!config) throw new Error(`Missing challenge configuration for ${draft.task}.`);
+    const savedDraft = { ...draft, challengeConfig: config };
     if (editingId) {
-      setAlarms((current) => current.map((alarm) => (alarm.id === editingId ? draft : alarm)));
+      setAlarms((current) => current.map((alarm) => (alarm.id === editingId ? savedDraft : alarm)));
       trackEvent('alarm_updated', { task: draft.task, time: draft.time });
     } else {
-      setAlarms((current) => [...current, { ...draft, id: Date.now().toString() }]);
+      setAlarms((current) => [...current, { ...savedDraft, id: Date.now().toString() }]);
       trackEvent('alarm_created', { task: draft.task, time: draft.time });
     }
     try {
@@ -1487,54 +1753,53 @@ export default function App() {
     alarm = nextAlarm,
     occurrenceId: string | null = null,
     firstRingAt = Date.now(),
+    entryScreen: 'ringing' | 'alarm' = 'ringing',
   ) => {
     if (!alarm) {
       Alert.alert('No active alarm', 'Create or enable an alarm before starting a wake-up drill.');
       return;
     }
-    if (alarm.task === 'QR scan' && !alarm.qrCode) {
-      Alert.alert('QR code not linked', 'Edit this alarm and scan your physical QR code before starting the challenge.');
+    if (!alarm.task) {
+      Alert.alert(
+        'Choose a wake-up challenge',
+        'This saved alarm needs one of the four supported challenges before it can ring.',
+        [{
+          text: 'CHOOSE A CHALLENGE',
+          onPress: () => {
+            setExpandedEditorSection('task');
+            openEditAlarm(alarm);
+          },
+        }],
+      );
       return;
     }
-    const configuredHuntItems = alarm.huntItems?.length ? alarm.huntItems : alarm.huntTarget ? [alarm.huntTarget] : [];
-    const huntTarget = chooseHuntTarget(configuredHuntItems);
-    if (alarm.task === 'Object Hunt' && !huntTarget) {
-      Alert.alert('Choose an object', 'Edit this alarm and select at least one target object before starting Object Hunt.');
-      return;
-    }
-    setLastAlarm(alarm);
+    const challengeConfig = challengeConfigurationForAlarm(alarm);
+    if (!challengeConfig) throw new Error(`Missing challenge configuration for ${alarm.task}.`);
+    const runtimeAlarm: ActiveAlarm = { ...alarm, task: alarm.task, challengeConfig };
+    setLastAlarm(runtimeAlarm);
     const sameOccurrence = occurrenceId !== null && activeOccurrenceId.current === occurrenceId;
-    activeChallengeAlarmId.current = alarm.id;
+    activeChallengeAlarmId.current = runtimeAlarm.id;
     activeOccurrenceId.current = occurrenceId;
-    activeYellAlarm.current = alarm.task === 'Yell to Wake';
+    let lifecycleState = transitionAlarmState('scheduled', 'ringing');
+    if (entryScreen === 'alarm') {
+      lifecycleState = transitionAlarmState(lifecycleState, 'challenge_pending');
+      lifecycleState = transitionAlarmState(lifecycleState, 'challenge_active');
+    }
+    alarmSessionState.current = { occurrenceId, state: lifecycleState };
+    challengeTransitionInProgress.current = false;
+    ringingSwipeX.value = 0;
     if (!sameOccurrence) activeRingStartedAt.current = firstRingAt;
-    setAnswer('');
     setWrongAnswers(0);
-    setMathAttempts(0);
-    setMathCorrect(0);
     setShakeCount(0);
-    setExerciseReps(0);
-    setBrushingSeconds(BRUSHING_DURATION_SECONDS);
-    brushingEndsAt.current = Date.now() + (BRUSHING_DURATION_SECONDS * 1000);
-    setQrScanned(false);
-    setQrError('');
     setHuntRecognitionMessage('');
-    setActiveHuntTarget(huntTarget);
-    setShuffleDisplayTarget(null);
-    setChallengeShuffleVisible(alarm.task === 'Object Hunt');
     setHuntRecognized(false);
-    setYellAlarmAudible(false);
     setAlarmFallbackReason(null);
     setChallengePreviewing(false);
     challengeCompleted.current = false;
-    lastExerciseRepAt.current = 0;
-    exerciseMotionActive.current = false;
-    setMemoryEntry('');
     challengeStartedAt.current = Date.now();
-    setScreen('alarm');
+    setScreen(entryScreen);
   };
 
-  const startChallengeRef = useRef(startChallenge);
   startChallengeRef.current = startChallenge;
 
   const handleNativeRing = useCallback((event: RingStartedEvent) => {
@@ -1548,27 +1813,102 @@ export default function App() {
       device_model: alarmHealth?.deviceModel ?? 'unknown',
     });
     const savedAlarm = alarmsRef.current.find((item) => item.id === event.alarmId);
-    const testTasks: Task[] = ['Math', 'Shake', 'QR scan', 'Memory', 'Object Hunt', 'Toothbrush', 'Push-ups', 'Squats', 'Yell to Wake', 'Face Challenge'];
-    const testTask = testTasks.find((task) => task === event.challenge) ?? 'Math';
+    const testTask = TASKS.find((option) => option.task === event.challenge)?.task ?? 'Shake Your Phone';
+    const testChallengeType = challengeTypeForTask(testTask);
     const testTime = new Date(event.scheduledAt);
     const alarm: Alarm | null = savedAlarm ?? (event.testAlarm ? {
       id: event.alarmId,
       time: `${String(testTime.getHours()).padStart(2, '0')}:${String(testTime.getMinutes()).padStart(2, '0')}`,
       task: testTask,
       days: [],
-      sound: event.sound,
+      sound: migrateAlarmSoundId(event.sound),
       enabled: true,
       savage: false,
-      mathDifficulty: 'Easy',
-      shakeCount: 50,
+      challengeConfig: defaultChallengeConfiguration(testChallengeType ?? 'shake_phone'),
     } : null);
     if (!alarm) {
       pendingNotificationAlarmId.current = { alarmId: event.alarmId, occurrenceId: event.occurrenceId };
       return;
     }
-    if (activeChallengeAlarmId.current === event.alarmId) return;
-    startChallengeRef.current(alarm, event.occurrenceId, event.at);
+    if (
+      activeChallengeAlarmId.current === event.alarmId
+      && activeOccurrenceId.current === event.occurrenceId
+    ) return;
+    if (event.state === 'challenge_pending' && isNativeAlarmAvailable) {
+      if (pendingChallengeResume.current === event.occurrenceId) return;
+      pendingChallengeResume.current = event.occurrenceId;
+      void activateNativeChallenge(event.alarmId, event.occurrenceId)
+        .then(() => {
+          startChallengeRef.current(alarm, event.occurrenceId, event.at, 'alarm');
+        })
+        .catch((error: unknown) => {
+          console.error('A pending wake-up challenge could not be restored.', error);
+          Alert.alert('Challenge unavailable', 'Wayykup could not restore the active challenge. The alarm is still ringing.');
+        })
+        .finally(() => {
+          pendingChallengeResume.current = null;
+        });
+      return;
+    }
+    startChallengeRef.current(
+      alarm,
+      event.occurrenceId,
+      event.at,
+      event.state === 'challenge_active' ? 'alarm' : 'ringing',
+    );
   }, [refreshStats]);
+
+  const activateChallengeAfterSwipe = useCallback(async () => {
+    if (screen !== 'ringing' || challengeTransitionInProgress.current || challengeCompleted.current) return;
+    challengeTransitionInProgress.current = true;
+    const occurrenceId = activeOccurrenceId.current;
+    try {
+      const session = alarmSessionState.current;
+      if (session.occurrenceId !== occurrenceId) {
+        throw new Error('The active alarm occurrence changed before the challenge started.');
+      }
+      if (session.state === 'ringing') {
+        session.state = transitionAlarmState(session.state, 'challenge_pending');
+      }
+      if (session.state !== 'challenge_pending') {
+        throw new Error('The active alarm is not waiting for a challenge.');
+      }
+      if (occurrenceId && isNativeAlarmAvailable) {
+        await activateNativeChallenge(lastAlarm.id, occurrenceId);
+      }
+      if (activeOccurrenceId.current !== occurrenceId) return;
+      session.state = transitionAlarmState(session.state, 'challenge_active');
+      ringingSwipeX.value = 0;
+      setScreen('alarm');
+    } catch (error) {
+      console.error('The alarm challenge could not be activated.', error);
+      Alert.alert(
+        'Challenge still locked',
+        error instanceof Error ? error.message : 'Wayykup could not verify the active alarm. Keep the alarm screen open and try again.',
+      );
+    } finally {
+      challengeTransitionInProgress.current = false;
+    }
+  }, [isNativeAlarmAvailable, lastAlarm.id, ringingSwipeX, screen]);
+
+  const ringingSwipeGesture = useMemo(() => Gesture.Pan()
+    .activeOffsetX(12)
+    .failOffsetY([-18, 18])
+    .onUpdate((event) => {
+      if (event.translationX > 0) {
+        ringingSwipeX.value = Math.min(event.translationX, Math.max(0, windowWidth - 104));
+      }
+    })
+    .onEnd((event) => {
+      if (event.translationX >= 112 || event.velocityX >= 850) {
+        runOnJS(activateChallengeAfterSwipe)();
+      } else {
+        ringingSwipeX.value = withSpring(0, { damping: 18, stiffness: 190 });
+      }
+    }), [activateChallengeAfterSwipe, ringingSwipeX, windowWidth]);
+  const ringingSwipeThumbStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: ringingSwipeX.value }],
+  }));
 
   useEffect(() => {
     if (!isNativeAlarmAvailable || Platform.OS === 'web') return;
@@ -1598,23 +1938,66 @@ export default function App() {
       });
   }, [alarmsLoaded, handleNativeRing]);
 
-  const finishChallenge = useCallback(async (mathAnsweredCorrectly = false) => {
-    if (challengeCompleted.current) return;
+  useEffect(() => {
+    if (!alarmsLoaded || Platform.OS !== 'ios' || !isNativeAlarmAvailable) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      getPendingChallenge()
+        .then((event) => {
+          if (event) handleNativeRing(event);
+        })
+        .catch((error: unknown) => {
+          console.error('AlarmKit challenge state could not be restored after returning to Wayykup.', error);
+        });
+    });
+    return () => subscription.remove();
+  }, [alarmsLoaded, handleNativeRing]);
+
+  const finishChallenge = useCallback(async () => {
+    const session = alarmSessionState.current;
+    if (
+      screen !== 'alarm'
+      || challengeCompleted.current
+      || session.state !== 'challenge_active'
+      || session.occurrenceId !== activeOccurrenceId.current
+    ) return;
     challengeCompleted.current = true;
-    activeChallengeAlarmId.current = null;
-    activeYellAlarm.current = false;
-    if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
-      void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
-        console.error('Native alarm audio could not be restored after Yell to Wake.', error);
-      });
-    }
     const completedAt = Date.now();
     const challengeDurationMs = Math.max(
       0,
       completedAt - (activeRingStartedAt.current || challengeStartedAt.current),
     );
     const occurrenceId = activeOccurrenceId.current;
+    if (occurrenceId && isNativeAlarmAvailable) {
+      try {
+        await cancelNativeAlarmChain(lastAlarm.id, occurrenceId);
+      } catch (error) {
+        challengeCompleted.current = false;
+        console.error('Verified challenge could not dismiss the native alarm.', error);
+        Alert.alert(
+          'Alarm is still active',
+          error instanceof Error ? error.message : 'Wayykup could not verify this alarm occurrence. Keep trying or retry the completed challenge.',
+        );
+        return;
+      }
+    }
+    if (Platform.OS === 'ios' && isNativeAlarmAvailable && lastAlarm.days.length > 0) {
+      try {
+        await scheduleNativeAlarm(lastAlarm);
+      } catch (error) {
+        console.error('Completed repeating iOS alarm could not be scheduled for its next occurrence.', error);
+        Alert.alert(
+          'Next alarm could not be scheduled',
+          'This alarm was stopped successfully, but Wayykup could not schedule its next occurrence. Check alarm permissions and review the alarm.',
+        );
+      }
+    }
+
+    session.state = transitionAlarmState(session.state, 'challenge_completed');
+    session.state = transitionAlarmState(session.state, 'dismissed');
+    activeChallengeAlarmId.current = null;
     activeOccurrenceId.current = null;
+    setScreen('wakeSuccess');
     setChallengeDurationSeconds(Math.max(1, Math.floor((Date.now() - challengeStartedAt.current) / 1000)));
     if (lastAlarm.days.length === 0) {
       setAlarms((current) => current.map((alarm) => (
@@ -1628,7 +2011,6 @@ export default function App() {
       device_model: alarmHealth?.deviceModel ?? 'unknown',
     });
     if (!occurrenceId) {
-      setScreen('stats');
       return;
     }
 
@@ -1651,19 +2033,10 @@ export default function App() {
         Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       );
       await completeOccurrence(occurrenceId, completedAt, {
-        shakesCounted: lastAlarm.task === 'Shake' ? shakeCount : undefined,
-        steps: lastAlarm.task === 'Push-ups' || lastAlarm.task === 'Squats' ? exerciseReps : undefined,
-        mathCorrect: lastAlarm.task === 'Math' ? mathCorrect + (mathAnsweredCorrectly ? 1 : 0) : undefined,
-        mathAttempts: lastAlarm.task === 'Math' ? mathAttempts + (mathAnsweredCorrectly ? 1 : 0) : undefined,
+        shakesCounted: lastAlarm.task === 'Shake Your Phone' ? shakeCount : undefined,
         challengeDurationMs,
       }, fallbackOccurrence, activeRingStartedAt.current || completedAt);
       localCompletionSaved = true;
-      try {
-        await cancelNativeAlarmChain(lastAlarm.id, 'completed');
-      } catch (error) {
-        console.error('Completed wake-up was saved, but the native alarm could not be stopped.', error);
-        Alert.alert('Wake-up saved', 'Your wake-up was recorded, but Wayykup could not stop the native alarm service.');
-      }
       await refreshAlarmHealth();
       let updatedOccurrences = await getOccurrences();
       const completedOccurrence = updatedOccurrences.find((item) => item.id === occurrenceId);
@@ -1683,9 +2056,6 @@ export default function App() {
           previousWakeDurationMs,
         });
         setMorningRatingState(completedOccurrence.morningRating ?? null);
-        setScreen('streak');
-      } else {
-        setScreen('stats');
       }
     } catch (error) {
       if (localCompletionSaved) {
@@ -1693,53 +2063,40 @@ export default function App() {
         await refreshStats();
         setStatsError('Wake-up saved. Some streak details could not be refreshed.');
         Alert.alert('Wake-up saved', 'Your challenge completion was saved locally, but Wayykup could not refresh all streak details.');
-        setScreen('stats');
         return;
       }
       console.error('Completed alarm could not be recorded in local stats.', error);
       setStatsError('This wake-up could not be saved to Stats.');
       Alert.alert('Wake-up not saved', 'The challenge is complete, but Wayykup could not save this alarm session locally.');
-      setScreen('stats');
     }
   }, [
-    exerciseReps,
     lastAlarm.days.length,
     lastAlarm.id,
     lastAlarm.task,
     alarmHealth?.deviceModel,
-    mathAttempts,
-    mathCorrect,
     occurrences,
     refreshAlarmHealth,
     refreshStats,
+    screen,
     shakeCount,
     snoozeLevel,
     streakFreezes,
   ]);
 
-  const switchToChallengeFallback = (reason: string) => {
-    activeYellAlarm.current = false;
-    if (Platform.OS === 'android') {
-      void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
-        console.error('Native alarm audio could not be restored for the fallback challenge.', error);
+  useEffect(() => {
+    if (screen !== 'alarm' || lastAlarm.task !== 'Shake Your Phone' || sensorAvailable) return;
+    setAlarmFallbackReason('motion_sensor_unavailable');
+  }, [lastAlarm, screen, sensorAvailable]);
+
+  const recordChallengeFailure = useCallback(() => {
+    const nextWrongCount = wrongAnswers + 1;
+    setWrongAnswers(nextWrongCount);
+    const occurrenceId = activeOccurrenceId.current;
+    if (occurrenceId && Platform.OS === 'android') {
+      void setAlarmVolumeTier(Math.min(3, nextWrongCount)).catch((error: unknown) => {
+        console.error('Native alarm volume could not be raised after a failed challenge.', error);
       });
     }
-    const fallbackAlarm: Alarm = {
-      ...lastAlarm,
-      task: lastAlarm.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask,
-    };
-    startChallengeRef.current(
-      fallbackAlarm,
-      activeOccurrenceId.current,
-      activeRingStartedAt.current || Date.now(),
-    );
-    setAlarmFallbackReason(reason);
-  };
-
-  const recordChallengeFailure = useCallback((isMathAttempt = false) => {
-    setWrongAnswers((count) => count + 1);
-    if (isMathAttempt) setMathAttempts((count) => count + 1);
-    const occurrenceId = activeOccurrenceId.current;
     if (!occurrenceId) return;
     recordFailedAttempt(occurrenceId)
       .then(() => refreshStats())
@@ -1747,28 +2104,7 @@ export default function App() {
         console.error('Failed wake-up attempt could not be recorded.', error);
         Alert.alert('Attempt not saved', 'Wayykup could not save this failed attempt to your local wake-up history.');
       });
-  }, [refreshStats]);
-
-  useEffect(() => {
-    if (screen !== 'alarm' || !challengeShuffleVisible || !activeHuntTarget) return;
-    let index = 0;
-    let timeout: ReturnType<typeof setTimeout>;
-    const advance = () => {
-      if (index >= 9) {
-        setShuffleDisplayTarget(activeHuntTarget);
-        timeout = setTimeout(() => setChallengeShuffleVisible(false), 500);
-        return;
-      }
-      const availableTargets = lastAlarm.huntItems?.length
-        ? lastAlarm.huntItems
-        : [activeHuntTarget];
-      setShuffleDisplayTarget(availableTargets[index % availableTargets.length]);
-      timeout = setTimeout(advance, 90 + index * 36);
-      index += 1;
-    };
-    advance();
-    return () => clearTimeout(timeout);
-  }, [activeHuntTarget, challengeShuffleVisible, lastAlarm.huntItems, screen]);
+  }, [refreshStats, wrongAnswers]);
 
   useEffect(() => {
     if (screen !== 'alarm' || lastAlarm.task !== 'Object Hunt' || !huntRecognized) return;
@@ -1777,30 +2113,15 @@ export default function App() {
   }, [finishChallenge, huntRecognized, lastAlarm.task, screen]);
 
   useEffect(() => {
-    if (screen !== 'alarm' || lastAlarm.task !== 'Toothbrush') return;
-    const interval = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((brushingEndsAt.current - Date.now()) / 1000));
-      setBrushingSeconds(remaining);
-      if (remaining === 0) {
-        clearInterval(interval);
-        finishChallenge();
-      }
-    }, 250);
-    return () => clearInterval(interval);
-  }, [finishChallenge, lastAlarm.task, screen]);
-
-  useEffect(() => {
-    if (screen === 'alarm' && lastAlarm.task === 'Shake' && shakeCount >= lastAlarm.shakeCount) {
-      finishChallenge();
-    }
     if (
       screen === 'alarm'
-      && (lastAlarm.task === 'Push-ups' || lastAlarm.task === 'Squats')
-      && exerciseReps >= EXERCISE_REP_TARGET
+      && lastAlarm.task === 'Shake Your Phone'
+      && lastAlarm.challengeConfig.type === 'shake_phone'
+      && shakeCount >= lastAlarm.challengeConfig.targetCount
     ) {
       finishChallenge();
     }
-  }, [exerciseReps, finishChallenge, lastAlarm.shakeCount, lastAlarm.task, screen, shakeCount]);
+  }, [finishChallenge, lastAlarm.challengeConfig, lastAlarm.task, screen, shakeCount]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -1825,8 +2146,8 @@ export default function App() {
           occurrenceId,
           at: receivedAt,
           scheduledAt: typeof scheduledAt === 'number' ? scheduledAt : receivedAt,
-          challenge: typeof challenge === 'string' ? challenge : 'Math',
-          sound: typeof sound === 'string' ? sound : 'Air raid',
+          challenge: typeof challenge === 'string' ? challenge : 'Shake Your Phone',
+          sound: typeof sound === 'string' ? sound : DEFAULT_ALARM_SOUND_ID,
           testAlarm: true,
         });
         return;
@@ -1866,78 +2187,12 @@ export default function App() {
     startChallengeRef.current(alarm, pending.occurrenceId, Date.now());
   }, [alarms, alarmsLoaded]);
 
-  const snoozeAlarm = async () => {
-    if (!lastAlarm.savage) return;
-    try {
-      if (!isNativeAlarmAvailable || !alarmHealth?.canSchedule) {
-        Alert.alert('Snooze unavailable', 'Native alarm permissions are required to re-arm this alarm.');
-        return;
-      }
-      if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
-        activeYellAlarm.current = false;
-        await setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
-      }
-      await rearmNativeAlarm(lastAlarm.id, 300_000);
-      if (activeOccurrenceId.current) {
-        await recordRearm(activeOccurrenceId.current);
-        await refreshStats();
-      }
-      setSnoozeLevels((levels) => ({ ...levels, [lastAlarm.id]: snoozeLevel + 1 }));
-      trackEvent('alarm_snoozed', { task: lastAlarm.task, snooze_count: snoozeLevel + 1 });
-      activeChallengeAlarmId.current = null;
-      alarmPlayer.pause();
-      setScreen('home');
-    } catch (error) {
-      console.error('Could not schedule native snooze.', error);
-      Alert.alert('Snooze failed', error instanceof Error ? error.message : 'The operating system did not accept the native re-arm.');
-    }
-  };
-
-  const emergencyBypass = () => {
-    Alert.alert(
-      'Emergency exit',
-      'Leaving the challenge will be recorded as a bypass and will break your wake streak.',
-      [
-        { text: 'Keep going', style: 'cancel' },
-        {
-          text: 'Bypass alarm',
-          style: 'destructive',
-          onPress: () => {
-            challengeCompleted.current = true;
-            activeYellAlarm.current = false;
-            if (lastAlarm.task === 'Yell to Wake' && Platform.OS === 'android') {
-              void setAlarmAudioDucked(false, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs).catch((error: unknown) => {
-                console.error('Native alarm audio could not be restored after emergency bypass.', error);
-              });
-            }
-            const occurrenceId = activeOccurrenceId.current;
-            activeOccurrenceId.current = null;
-            activeChallengeAlarmId.current = null;
-            const exit = async () => {
-              if (occurrenceId) {
-                try {
-                  await resolveOccurrence(occurrenceId, 'bypassed');
-                  await cancelNativeAlarmChain(lastAlarm.id, 'bypassed');
-                  await refreshStats();
-                } catch (error) {
-                  console.error('Emergency alarm bypass could not be recorded.', error);
-                  Alert.alert('Bypass not saved', 'The challenge was closed, but the bypass could not be recorded in your wake history.');
-                }
-              }
-              setScreen('home');
-            };
-            void exit();
-          },
-        },
-      ],
-    );
-  };
-
   const purchaseSubscription = async (
     packageOverride?: Parameters<typeof Purchases.purchasePackage>[0],
     failureStage?: PaywallStage,
     refreshOfferings = false,
     packageTypeOverride?: (typeof Purchases.PACKAGE_TYPE)[keyof typeof Purchases.PACKAGE_TYPE],
+    useAndroidAnnualDiscount = false,
   ) => {
     setBillingError('');
     setBillingBusy(true);
@@ -1948,33 +2203,54 @@ export default function App() {
         return;
       }
 
-      let packages = availablePackages;
+      let offering = currentOffering;
       if (refreshOfferings) {
         const offerings = await Purchases.getOfferings();
-        packages = offerings.current?.availablePackages ?? [];
-        setAvailablePackages(packages);
+        offering = offerings.current;
+        setCurrentOffering(offering);
+        setAvailablePackages(offering?.availablePackages ?? []);
       }
 
       const wantedType = packageTypeOverride ?? (plan === 'yearly'
         ? Purchases.PACKAGE_TYPE.ANNUAL
         : Purchases.PACKAGE_TYPE.MONTHLY);
       const selectedPackage = packageOverride
-        ? packages.find((item) => item.identifier === packageOverride.identifier)
-        : packages.find((item) => item.packageType === wantedType);
+        ? offering?.availablePackages.find((item) => item.identifier === packageOverride.identifier)
+        : wantedType === Purchases.PACKAGE_TYPE.ANNUAL
+          ? offering?.annual
+          : wantedType === Purchases.PACKAGE_TYPE.MONTHLY
+            ? offering?.monthly
+            : offering?.availablePackages.find((item) => item.packageType === wantedType);
       if (!selectedPackage) {
         setBillingError('This plan is not available in the current RevenueCat offering.');
         if (failureStage) setPaywallStage(failureStage);
         return;
       }
 
-      const result = await Purchases.purchasePackage(selectedPackage);
+      let result: Awaited<ReturnType<typeof Purchases.purchasePackage>>;
+      if (useAndroidAnnualDiscount && Platform.OS === 'android') {
+        const discountOption = selectedPackage.product.subscriptionOptions?.find(
+          (option) => option.id === 'annual:annual-discount' || option.id.endsWith(':annual-discount'),
+        );
+        if (!discountOption) {
+          setBillingError('The special offer is no longer available. Choose from the regular plans.');
+          if (failureStage) setPaywallStage('timeline');
+          return;
+        }
+        result = await Purchases.purchaseSubscriptionOption(discountOption);
+      } else {
+        result = await Purchases.purchasePackage(selectedPackage);
+      }
       if (!result.customerInfo.entitlements.active.wayykup_premium) {
         setBillingError('Purchase completed, but the Wayykup Premium entitlement was not returned.');
         if (failureStage) setPaywallStage(failureStage);
         return;
       }
       setCustomerInfo(result.customerInfo);
+      premiumEntitlementRef.current = true;
       setHasPremium(true);
+      setLocalAppUnlocked(true);
+      setBillingStatus('ready');
       void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
         console.error('Purchased app access could not be saved.', error);
         Alert.alert('Progress could not be saved', 'Your purchase is active, but Wayykup may not remember your app access next time.');
@@ -2001,7 +2277,10 @@ export default function App() {
       const customerInfo = await Purchases.restorePurchases();
       setCustomerInfo(customerInfo);
       if (customerInfo.entitlements.active.wayykup_premium) {
+        premiumEntitlementRef.current = true;
         setHasPremium(true);
+        setLocalAppUnlocked(true);
+        setBillingStatus('ready');
         void persistAppProgress({ onboardingComplete: true, appUnlocked: true }).catch((error: unknown) => {
           console.error('Restored app access could not be saved.', error);
           Alert.alert('Progress could not be saved', 'Your purchase is active, but Wayykup may not remember your app access next time.');
@@ -2009,7 +2288,19 @@ export default function App() {
         trackEvent('subscription_restored');
         if (screen === 'paywall') setScreen('home');
       } else {
+        premiumEntitlementRef.current = false;
+        setHasPremium(false);
+        setLocalAppUnlocked(false);
+        setBillingStatus('ready');
         setBillingError('No active Wayykup Premium subscription was found.');
+        void loadAppProgress()
+          .then((progress) => {
+            if (!progress?.appUnlocked) return;
+            return persistAppProgress({ ...progress, appUnlocked: false });
+          })
+          .catch((error: unknown) => {
+            console.error('Restored app access could not be updated.', error);
+          });
       }
     } catch (error) {
       console.error('Purchase restoration failed.', error);
@@ -2017,27 +2308,17 @@ export default function App() {
     }
   };
 
+  const retryRevenueCat = () => {
+    setBillingError('');
+    setBillingStatus('loading');
+    setBillingRetryCount((count) => count + 1);
+  };
+
   const closeCurrentPlan = () => {
     setCurrentPlanModalVisible(false);
     if (!hasPremium) {
       setPaywallStage('intro');
       setScreen('paywall');
-    }
-  };
-
-  const beginQrLinking = async () => {
-    setQrError('');
-    if (cameraPermission?.granted) {
-      setLinkingQr(true);
-      return;
-    }
-    try {
-      const permission = await requestCameraPermission();
-      if (permission.granted) setLinkingQr(true);
-      else setQrError('Camera permission is needed to link a QR code.');
-    } catch (error) {
-      console.error('Camera permission could not be requested.', error);
-      setQrError('Camera access is unavailable on this device.');
     }
   };
 
@@ -2065,28 +2346,33 @@ export default function App() {
 
   const isDaySelected = (index: number) => draft.days.includes(String(index));
 
-  const completeOnboarding = ({ alarm, notificationGranted, keepAlarmPlaying }: OnboardingSetup) => {
-    const newAlarm: Alarm = {
-      ...alarm,
-      shakeCount: alarm.shakeCount ?? 100,
-    };
-    setDraft(newAlarm);
-    setAlarms((current) => [
-      ...current.filter((item) => !['alpha', 'bravo', 'charlie'].includes(item.id)),
+  const completeOnboarding = async ({ alarm, notificationGranted, keepAlarmPlaying }: OnboardingSetup) => {
+    const newAlarm: Alarm = alarm;
+    const nextAlarms = [
+      ...alarmsRef.current.filter((item) => !['alpha', 'bravo', 'charlie'].includes(item.id)),
       newAlarm,
-    ]);
+    ];
+    const completedProgress = { onboardingComplete: true, appUnlocked: false };
+    try {
+      await Promise.all([
+        persistAlarms(nextAlarms),
+        persistKeepAlarmPlayingPreference(keepAlarmPlaying),
+        persistAppProgress(completedProgress),
+      ]);
+    } catch (error) {
+      console.error('Onboarding setup could not be saved.', error);
+      Alert.alert('Setup could not be saved', 'Wayykup could not save your alarm and setup. Please try again before leaving onboarding.');
+      throw error;
+    }
+
+    alarmsRef.current = nextAlarms;
+    setDraft(newAlarm);
+    setAlarms(nextAlarms);
     setNotificationsAllowed(notificationGranted);
+    setLocalAppUnlocked(false);
     setKeepAlarmPlayingDuringChallenges(keepAlarmPlaying);
-    persistKeepAlarmPlayingPreference(keepAlarmPlaying).catch((error: unknown) => {
-      console.error('Onboarding alarm playback preference could not be saved.', error);
-      Alert.alert('Could not save setting', 'The alarm playback preference could not be saved. You can update it later in Settings.');
-    });
     setPaywallStage('intro');
-    void persistAppProgress({ onboardingComplete: true, appUnlocked: false }).catch((error: unknown) => {
-      console.error('Onboarding completion could not be saved.', error);
-      Alert.alert('Progress could not be saved', 'Wayykup may ask you to repeat setup the next time it opens.');
-    });
-    trackEvent('onboarding_completed', { task: newAlarm.task, time: newAlarm.time });
+    trackEvent('onboarding_completed', { task: newAlarm.task ?? 'none', time: newAlarm.time });
     setScreen(hasPremium ? 'home' : 'paywall');
   };
 
@@ -2099,7 +2385,20 @@ export default function App() {
     Purchases.getCustomerInfo()
       .then((latestInfo) => {
         setCustomerInfo(latestInfo);
-        setHasPremium(Boolean(latestInfo.entitlements.active.wayykup_premium));
+        const isPremium = Boolean(latestInfo.entitlements.active.wayykup_premium);
+        premiumEntitlementRef.current = isPremium;
+        setHasPremium(isPremium);
+        if (!isPremium) {
+          setLocalAppUnlocked(false);
+          void loadAppProgress()
+            .then((progress) => {
+              if (!progress?.appUnlocked) return;
+              return persistAppProgress({ ...progress, appUnlocked: false });
+            })
+            .catch((error: unknown) => {
+              console.error('Expired app access could not be updated.', error);
+            });
+        }
       })
       .catch((error: unknown) => {
         console.error('Current subscription could not be refreshed.', error);
@@ -2163,9 +2462,9 @@ export default function App() {
       </View>
       <View style={styles.proofList}>
         {TASKS.slice(0, 3).map((task, index) => (
-          <View key={task.name} style={styles.proofRow}>
+          <View key={task.type} style={styles.proofRow}>
             <View style={styles.proofIcon}><Text style={styles.proofIconText}>{task.icon}</Text></View>
-            <View style={styles.proofCopy}><Text style={styles.proofName}>{task.name.toUpperCase()}</Text><Text style={styles.proofDetail}>{task.detail}</Text></View>
+            <View style={styles.proofCopy}><Text style={styles.proofName}>{task.title}</Text><Text style={styles.proofDetail}>{task.description}</Text></View>
             <Text style={styles.proofIndex}>0{index + 1}</Text>
           </View>
         ))}
@@ -2178,18 +2477,30 @@ export default function App() {
   );
 
   const renderPaywall = () => {
-    const annualPackage = availablePackages.find((item) => item.packageType === Purchases.PACKAGE_TYPE.ANNUAL);
+    const annualPackage = currentOffering?.annual ?? null;
     const annualProduct = annualPackage?.product;
     const introOffer = annualProduct?.introPrice;
-    const discountPackage = DISCOUNT_PACKAGE_ID
-      ? availablePackages.find((item) => item.identifier === DISCOUNT_PACKAGE_ID)
+    const androidAnnualDiscountOption = Platform.OS === 'android'
+      ? annualProduct?.subscriptionOptions?.find(
+        (option) => option.id === 'annual:annual-discount' || option.id.endsWith(':annual-discount'),
+      )
       : undefined;
+    const introPeriod = introOffer
+      ? formatBillingPeriod(introOffer.periodNumberOfUnits, introOffer.periodUnit)
+      : null;
+    const androidIntroPhase = androidAnnualDiscountOption?.introPhase;
+    const annualRenewalPrice = androidAnnualDiscountOption?.fullPricePhase?.price.formatted
+      ?? annualProduct?.priceString;
+    const hasSpecialOffer = Platform.OS === 'ios'
+      ? Boolean(annualIntroEligible && introOffer)
+      : Platform.OS === 'android'
+        ? Boolean(androidAnnualDiscountOption?.introPhase)
+        : false;
 
     const isIntro = paywallStage === 'intro';
-      const isReminder = paywallStage === 'reminder';
-      const isTimeline = paywallStage === 'timeline';
-      const isGift = paywallStage === 'gift';
-      const isDiscount = paywallStage === 'discount';
+    const isReminder = paywallStage === 'reminder';
+    const isTimeline = paywallStage === 'timeline' || (paywallStage === 'gift' && !hasSpecialOffer);
+    const isGift = paywallStage === 'gift' && hasSpecialOffer;
 
       if (isIntro) {
         return (
@@ -2198,7 +2509,7 @@ export default function App() {
             contentContainerStyle={[styles.trialIntro, compactViewport && styles.trialIntroCompact]}
             showsVerticalScrollIndicator={false}
           >
-            <Text style={[styles.trialTitle, { fontSize: Math.min(43, windowWidth * 0.11), lineHeight: Math.min(49, windowWidth * 0.125), marginTop: compactViewport ? 10 : 56 }]}>Try Wayykup{'\n'}for free</Text>
+            <Text style={[styles.trialTitle, { fontSize: Math.min(43, windowWidth * 0.11), lineHeight: Math.min(49, windowWidth * 0.125), marginTop: compactViewport ? 10 : 56 }]}>Get ready to{'\n'}own your mornings</Text>
             <View style={[styles.trialPhoneArea, { minHeight: trialPhoneHeight + 24 }]}>
               <AlarmPhonePreview phoneHeight={trialPhoneHeight} />
             </View>
@@ -2235,7 +2546,7 @@ export default function App() {
             showsVerticalScrollIndicator={false}
           >
             <Text style={[styles.trialReminderTitle, { fontSize: Math.min(42, windowWidth * 0.095), lineHeight: Math.min(50, windowWidth * 0.105) }]}>
-              We&apos;ll send you{'\n'}a reminder before your{'\n'}free trial ends
+              See your plan{'\n'}before you confirm
             </Text>
             <View style={styles.trialReminderArt}>
               <Svg width="190" height="210" viewBox="0 0 190 210" accessibilityLabel="Reminder bell">
@@ -2277,10 +2588,8 @@ export default function App() {
       }
 
       if (isTimeline) {
-        const introPeriod = introOffer
-          ? `${introOffer.periodNumberOfUnits} ${introOffer.periodUnit.toLowerCase()}${introOffer.periodNumberOfUnits === 1 ? '' : 's'}`
-          : null;
-        const hasFreeTrial = introOffer?.price === 0;
+        const hasEligibleIntro = Platform.OS === 'ios' && annualIntroEligible && introOffer;
+        const hasFreeTrial = Boolean(hasEligibleIntro && introOffer?.price === 0);
         const timelineItems = [
           {
             kind: 'unlock' as const,
@@ -2293,16 +2602,16 @@ export default function App() {
                 title: 'Before your trial ends — Reminder',
                 detail: `Your ${introPeriod} free trial is ending soon.`,
               }]
-            : introOffer
+            : hasEligibleIntro && introOffer
               ? [{
                   kind: 'bell' as const,
-                  title: 'Intro offer',
-                  detail: `${introOffer.priceString} for ${introPeriod}.`,
+                  title: 'Intro offer, if eligible',
+                  detail: `${introOffer.priceString} for your first ${introPeriod}, then ${annualProduct?.priceString ?? ''} per year.`,
                 }]
               : [{
                   kind: 'bell' as const,
-                  title: 'No free trial',
-                  detail: 'Your subscription starts when you confirm your purchase.',
+                  title: 'Standard subscription',
+                  detail: 'Your subscription starts at the displayed annual price when you confirm your purchase.',
                 }]),
           {
             kind: 'trophy' as const,
@@ -2324,10 +2633,15 @@ export default function App() {
               </TouchableOpacity>
               <TouchableOpacity
                 accessibilityRole="button"
-                accessibilityLabel="Dismiss and view special offer"
+                accessibilityLabel={hasSpecialOffer ? 'View special offer' : 'View subscription plans'}
                 onPress={() => {
                   setBillingError('');
-                  setPaywallStage('gift');
+                  if (hasSpecialOffer) {
+                    setPaywallStage('gift');
+                  } else {
+                    setPlan('yearly');
+                    setPlansModalVisible(true);
+                  }
                 }}
                 style={styles.proTrialClose}
               >
@@ -2349,9 +2663,6 @@ export default function App() {
               </Text>
               {annualProduct && (
                 <Text style={styles.proTrialBilled}>({annualProduct.priceString} billed yearly)</Text>
-              )}
-              {!annualPackage && (
-                <Text style={styles.proTrialUnavailable}>The annual plan is unavailable right now. You can review other plans.</Text>
               )}
               <Text style={styles.proTrialSectionTitle}>
                 {hasFreeTrial ? 'How your trial works' : 'How your subscription works'}
@@ -2414,21 +2725,40 @@ export default function App() {
             contentContainerStyle={[styles.giftOfferScreen, compactViewport && styles.giftOfferScreenCompact]}
             showsVerticalScrollIndicator={false}
           >
+            <View style={styles.giftOfferHeader}>
+              <Text style={styles.giftOfferHeaderLabel}>YOUR SPECIAL OFFER</Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Close special offer"
+                onPress={() => setPaywallStage('timeline')}
+                style={styles.giftOfferClose}
+              >
+                <Text style={styles.proTrialCloseGlyph}>×</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={[styles.giftOfferTitle, { fontSize: Math.min(37, windowWidth * 0.083), lineHeight: Math.min(45, windowWidth * 0.097) }]}>
-              Try Wayykup and{'\n'}win your mornings
+              Your first year,{'\n'}at a special price
             </Text>
             <AnimatedGiftArtwork height={Math.min(380, Math.max(230, availableHeight * (compactViewport ? 0.34 : 0.43)))} />
             <View style={styles.giftOfferFooter}>
+              <Text style={styles.giftOfferTerms}>
+                {Platform.OS === 'ios' && introOffer && annualProduct
+                  ? `${introOffer.priceString} for your first ${introPeriod}, then ${annualProduct.priceString} per year. Renews automatically unless cancelled.`
+                  : androidIntroPhase && annualRenewalPrice
+                    ? `${androidIntroPhase.price.formatted} for your first ${formatBillingPeriod(androidIntroPhase.billingPeriod.value, androidIntroPhase.billingPeriod.unit)}, then ${annualRenewalPrice} per year. Renews automatically unless cancelled.`
+                    : ''}
+              </Text>
               <AnimatedOfferButton
                 busy={billingBusy}
                 onPress={() => {
-                  if (discountPackage) {
-                    void purchaseSubscription(discountPackage, 'gift', true);
-                  } else {
-                    setBillingError('A separate special offer is not configured. Choose from the available plans.');
-                    setPlan('yearly');
-                    setPlansModalVisible(true);
-                  }
+                  setPlan('yearly');
+                  void purchaseSubscription(
+                    undefined,
+                    'gift',
+                    true,
+                    Purchases.PACKAGE_TYPE.ANNUAL,
+                    Platform.OS === 'android',
+                  );
                 }}
               />
               <View style={styles.trialCancelRow}>
@@ -2454,48 +2784,23 @@ export default function App() {
             <Text style={styles.wordmarkSmall}>WAYYKUP<Text style={styles.wordmarkDot}>.</Text></Text>
           </View>
           <View style={styles.waterfallHero}>
-            <Text style={styles.waterfallIcon}>{isIntro ? '◴' : isTimeline ? '✦' : isGift ? '🎁' : '✦'}</Text>
+            <Text style={styles.waterfallIcon}>{isIntro ? '◴' : '✦'}</Text>
             <Text style={styles.eyebrow}>{isGift ? 'A THANK-YOU OFFER' : 'YOUR MORNING, REBUILT'}</Text>
             <Text style={styles.waterfallTitle}>
-              {isIntro ? 'Your wake-up plan is ready.' : isTimeline ? 'Unlock Wayykup Pro.' : isGift ? 'Win back your mornings.' : 'Your annual offer.'}
+              {isIntro ? 'Your wake-up plan is ready.' : 'Unlock Wayykup Pro.'}
             </Text>
             <Text style={styles.bodyCopy}>
               {isIntro
                 ? 'Your first alarm is set. Choose a plan to unlock the full set of wake-up challenges and sounds.'
-                : isTimeline
-                  ? 'Your store purchase sheet will show any eligible introductory offer and the exact renewal terms.'
-                    : isGift
-                      ? discountPackage
-                        ? 'A special annual package is available through your store.'
-                        : 'No additional discount package is configured right now. Review the available subscription plans below.'
-                      : 'The store will show the localized price and billing period before you confirm.'}
+                : 'The store will show the localized price and billing period before you confirm.'}
             </Text>
           </View>
-
-          {(isTimeline || isDiscount) && (
-            <View style={styles.waterfallTimeline}>
-              <View style={styles.waterfallTimelineRow}><Text style={styles.waterfallTimelineDot}>1</Text><View style={styles.waterfallTimelineCopy}><Text style={styles.waterfallTimelineTitle}>Today</Text><Text style={styles.waterfallTimelineDetail}>Full access starts after purchase.</Text></View></View>
-              <View style={styles.waterfallTimelineRow}><Text style={styles.waterfallTimelineDot}>2</Text><View style={styles.waterfallTimelineCopy}><Text style={styles.waterfallTimelineTitle}>Intro offer, if eligible</Text><Text style={styles.waterfallTimelineDetail}>{annualPackage?.product.introPrice ? `${annualPackage.product.introPrice.priceString} for ${annualPackage.product.introPrice.periodNumberOfUnits} ${annualPackage.product.introPrice.periodUnit.toLowerCase()} period${annualPackage.product.introPrice.periodNumberOfUnits === 1 ? '' : 's'}.` : 'No introductory offer is configured for the annual plan.'}</Text></View></View>
-              <View style={styles.waterfallTimelineRow}><Text style={styles.waterfallTimelineDot}>3</Text><View style={styles.waterfallTimelineCopy}><Text style={styles.waterfallTimelineTitle}>Renewal</Text><Text style={styles.waterfallTimelineDetail}>{annualPackage ? `${annualPackage.product.priceString} per year, as shown by your store.` : 'Annual pricing is currently unavailable.'}</Text></View></View>
-            </View>
-          )}
-
-          {isDiscount && discountPackage && (
-            <View style={styles.discountCard}>
-              <Text style={styles.discountBanner}>ANNUAL PACKAGE</Text>
-              <Text style={styles.discountProduct}>{discountPackage.product.title}</Text>
-              <Text style={styles.discountPrice}>{discountPackage.product.priceString}</Text>
-              <Text style={styles.discountDetail}>Final price and renewal terms are confirmed in the store purchase sheet.</Text>
-            </View>
-          )}
 
           <View style={styles.waterfallActions}>
             {isIntro && <ActionButton label="CONTINUE" onPress={() => setPaywallStage('reminder')} />}
             {isReminder && <ActionButton label="CONTINUE" onPress={() => setPaywallStage('timeline')} />}
-            {isTimeline && <ActionButton label={billingBusy ? 'CONNECTING TO APP STORE…' : 'CONTINUE TO STORE'} onPress={() => purchaseSubscription()} disabled={billingBusy || (!annualPackage && !__DEV__)} />}
-            {isGift && discountPackage && <ActionButton label="CLAIM MY SPECIAL OFFER" onPress={() => setPaywallStage('discount')} />}
-            {isDiscount && discountPackage && <ActionButton label={billingBusy ? 'CONNECTING TO APP STORE…' : 'CONTINUE'} onPress={() => purchaseSubscription(discountPackage)} disabled={billingBusy} />}
-            {(isTimeline || isDiscount) && !!billingError && <Text accessibilityRole="alert" style={styles.billingError}>{billingError}</Text>}
+            {isTimeline && <ActionButton label={billingBusy ? 'CONNECTING TO APP STORE…' : 'CONTINUE TO STORE'} onPress={() => purchaseSubscription(undefined, undefined, true, Purchases.PACKAGE_TYPE.ANNUAL)} disabled={billingBusy || !annualPackage} />}
+            {isTimeline && !!billingError && <Text accessibilityRole="alert" style={styles.billingError}>{billingError}</Text>}
             {isTimeline && (
               <TouchableOpacity
                 onPress={() => {
@@ -2524,9 +2829,11 @@ export default function App() {
         ? 'Checking native alarm permissions…'
         : !alarmHealth.canRingNow
           ? 'Alarm access is incomplete. Tap to review permissions.'
-          : alarmHealth.batteryRestricted
-              ? 'Battery restrictions may delay alarms on this device.'
-              : null;
+          : alarmHealth.reliability === 'reduced'
+            ? 'This iOS version uses notifications, not a persistent alarm. AlarmKit requires iOS 26+.'
+            : alarmHealth.batteryRestricted
+            ? 'Battery restrictions may delay alarms on this device.'
+            : null;
 
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -2564,6 +2871,11 @@ export default function App() {
                 onPress={() => {
                   if (!isNativeAlarmAvailable) {
                     Alert.alert('Development build required', 'Alarm testing is disabled in Expo Go. Install the Wayykup development build.');
+                  } else if (alarmHealth?.reliability === 'reduced') {
+                    Alert.alert(
+                      'iOS notification fallback',
+                      'This iOS version cannot provide the persistent alarm experience available with AlarmKit on iOS 26 and later.',
+                    );
                   } else if (alarmHealth?.canRingNow && alarmHealth.testAlarmPassed !== true) {
                     void beginAlarmTest();
                   } else if (!alarmHealth?.notifications) {
@@ -2611,7 +2923,7 @@ export default function App() {
                         onToggle={() => {
                           setOpenAlarmSwipeId(null);
                           setAlarms((current) => current.map((item) => item.id === alarm.id ? { ...item, enabled: !item.enabled } : item));
-                          trackEvent(alarm.enabled ? 'alarm_disabled' : 'alarm_enabled', { task: alarm.task, time: alarm.time });
+                          trackEvent(alarm.enabled ? 'alarm_disabled' : 'alarm_enabled', { task: alarm.task ?? 'none', time: alarm.time });
                         }}
                       />
                     </View>
@@ -2647,7 +2959,6 @@ export default function App() {
     const hourValues = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, '0'));
     const minuteValues = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'));
     const closeEditor = () => {
-      setLinkingQr(false);
       setChallengePreviewing(false);
       dismissEditor();
     };
@@ -2664,78 +2975,19 @@ export default function App() {
       setDraft((current) => ({ ...current, time: `${String(nextHour).padStart(2, '0')}:${String(minuteValue).padStart(2, '0')}` }));
     };
     const selectTask = (task: Task) => {
-      setLinkingQr(false);
+      const type = challengeTypeForTask(task);
+      if (!type) return;
       setChallengePreviewing(false);
-      setDraft((current) => ({ ...current, task }));
-      if (task === 'Yell to Wake') {
-        Alert.alert(
-          'Microphone access for Yell to Wake',
-          'Wayykup measures sound levels only while this challenge is active. Audio stays in memory on your device and is never saved or uploaded.',
-          [
-            { text: 'Not now', style: 'cancel', onPress: () => trackEvent('challenge_permission_denied', {
-              type: 'yell',
-              mode: draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
-              duration_ms: 0,
-              attempts: 0,
-              preview: false,
-            }) },
-            { text: 'Continue', onPress: () => {
-              requestRecordingPermissionsAsync()
-                .then((permission) => {
-                  if (!permission.granted) {
-                    trackEvent('challenge_permission_denied', {
-                      type: 'yell',
-                      mode: draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode,
-                      duration_ms: 0,
-                      attempts: 0,
-                      preview: false,
-                    });
-                    Alert.alert('Microphone access is off', 'Yell to Wake will switch to your chosen fallback if microphone access is unavailable when the alarm rings.');
-                  }
-                })
-                .catch((error: unknown) => {
-                  console.error('Microphone permission request failed for Yell to Wake.', error);
-                  Alert.alert('Microphone unavailable', 'Wayykup could not request microphone access. Yell to Wake will use your fallback if the microphone is unavailable at alarm time.');
-                });
-            } },
-          ],
-        );
-      } else if (task === 'Face Challenge') {
-        Alert.alert(
-          'Camera access for Face Challenge',
-          'Wayykup checks gestures on-device. Camera frames are not saved or uploaded, and no face identity is recognized.',
-          [
-            { text: 'Not now', style: 'cancel', onPress: () => trackEvent('challenge_permission_denied', {
-              type: 'face',
-              mode: 'gesture_sequence',
-              duration_ms: 0,
-              attempts: 0,
-              gesture_sequence: '',
-              preview: false,
-            }) },
-            { text: 'Continue', onPress: () => {
-              requestCameraPermission()
-                .then((permission) => {
-                  if (!permission.granted) {
-                    trackEvent('challenge_permission_denied', {
-                      type: 'face',
-                      mode: 'gesture_sequence',
-                      duration_ms: 0,
-                      attempts: 0,
-                      gesture_sequence: '',
-                      preview: false,
-                    });
-                    Alert.alert('Camera access is off', 'Face Challenge will switch to your chosen fallback if camera access is unavailable when the alarm rings.');
-                  }
-                })
-                .catch((error: unknown) => {
-                  console.error('Camera permission request failed for Face Challenge.', error);
-                  Alert.alert('Camera unavailable', 'Wayykup could not request camera access. Face Challenge will use your fallback if the camera is unavailable at alarm time.');
-                });
-            } },
-          ],
-        );
-      }
+      setDraft((current) => {
+        const config = current.challengeConfig?.type === type
+          ? current.challengeConfig
+          : defaultChallengeConfiguration(type);
+        return {
+          ...current,
+          task,
+          challengeConfig: config,
+        };
+      });
     };
     const previewSound = async (sound: string) => {
       if (previewingSound === sound) {
@@ -2748,7 +3000,7 @@ export default function App() {
       try {
         if (soundPreviewTimeout.current) clearTimeout(soundPreviewTimeout.current);
         await setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'doNotMix' });
-        soundPreviewPlayer.replace(SOUND_ASSETS[sound] ?? SOUND_ASSETS['Air raid']);
+        soundPreviewPlayer.replace(alarmSoundAsset(sound));
         soundPreviewPlayer.loop = false;
         soundPreviewPlayer.volume = 0.9;
         soundPreviewPlayer.play();
@@ -2763,35 +3015,6 @@ export default function App() {
         Alert.alert('Preview unavailable', 'Wayykup could not play this alarm preview on this device.');
       }
     };
-    const chooseDeviceSong = async () => {
-      if (!isNativeAlarmAvailable) {
-        Alert.alert('Development build required', 'Custom alarm sounds need the Wayykup development build. Expo Go cannot keep a selected song available to the native alarm.');
-        return;
-      }
-      try {
-        const result = await DocumentPicker.getDocumentAsync({
-          type: 'audio/*',
-          copyToCacheDirectory: true,
-        });
-        if (result.canceled) return;
-        const asset = result.assets[0];
-        if (!asset) throw new Error('The selected audio file could not be read.');
-        if (asset.mimeType && !asset.mimeType.startsWith('audio/')) {
-          throw new Error('Choose an audio file to use as your alarm sound.');
-        }
-        const imported = await importAlarmSound(asset.uri, asset.name);
-        setDraft((current) => ({
-          ...current,
-          sound: imported.displayName,
-          customSoundUri: imported.uri,
-          customSoundName: imported.name,
-        }));
-      } catch (error) {
-        console.error('Phone audio could not be added as an alarm sound.', error);
-        Alert.alert('Could not use that song', error instanceof Error ? error.message : 'Wayykup could not import the selected audio file.');
-      }
-    };
-
     return (
       <Modal visible={screen === 'editor'} transparent animationType="none" statusBarTranslucent onRequestClose={closeEditor}>
         <View style={styles.editorModal}>
@@ -2828,26 +3051,26 @@ export default function App() {
               <View style={styles.sheetSection}>
                 <TouchableOpacity onPress={() => setExpandedEditorSection(expandedEditorSection === 'sound' ? null : 'sound')} style={styles.sheetOptionRow}>
                   <View style={styles.sheetOptionIcon}><Text style={styles.sheetOptionGlyph}>♫</Text></View>
-                  <View style={styles.sheetOptionCopy}><Text style={styles.sheetOptionTitle}>Sound</Text><Text style={styles.sheetOptionSubtitle}>{draft.sound}</Text></View>
+                  <View style={styles.sheetOptionCopy}><Text style={styles.sheetOptionTitle}>Sound</Text><Text style={styles.sheetOptionSubtitle}>{alarmSoundName(draft.sound)}</Text></View>
                   <Text style={styles.sheetChevron}>{expandedEditorSection === 'sound' ? '⌄' : '›'}</Text>
                 </TouchableOpacity>
                 {expandedEditorSection === 'sound' && <View style={styles.sheetInlineOptions}>
-                  {SOUNDS.map((sound) => {
-                    const selected = draft.sound === sound && !draft.customSoundUri;
-                    const previewing = previewingSound === sound;
+                  {ALARM_SOUNDS.map((sound) => {
+                    const selected = draft.sound === sound.id;
+                    const previewing = previewingSound === sound.id;
                     return (
-                      <View key={sound} style={styles.sheetInlineOption}>
+                      <View key={sound.id} style={styles.sheetInlineOption}>
                         <TouchableOpacity
                           accessibilityRole="button"
-                          onPress={() => setDraft((current) => ({ ...current, sound, customSoundUri: undefined, customSoundName: undefined }))}
+                          onPress={() => setDraft((current) => ({ ...current, sound: sound.id }))}
                           style={{ flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: 43 }}
                         >
-                          <Text style={[styles.sheetInlineText, selected && styles.sheetInlineTextSelected]}>{sound}</Text>
+                          <Text style={[styles.sheetInlineText, selected && styles.sheetInlineTextSelected]}>{sound.name}</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           accessibilityRole="button"
-                          accessibilityLabel={`${previewing ? 'Stop' : 'Preview'} ${sound}`}
-                          onPress={() => { void previewSound(sound); }}
+                          accessibilityLabel={`${previewing ? 'Stop' : 'Preview'} ${sound.name}`}
+                          onPress={() => { void previewSound(sound.id); }}
                           style={{ minWidth: 42, minHeight: 43, alignItems: 'center', justifyContent: 'center' }}
                         >
                           <Text style={styles.soundPreviewButton}>{previewing ? '■' : '▶'}</Text>
@@ -2856,139 +3079,169 @@ export default function App() {
                       </View>
                     );
                   })}
-                  <TouchableOpacity accessibilityRole="button" onPress={() => { void chooseDeviceSong(); }} style={styles.sheetInlineOption}>
-                    <Text style={[styles.sheetInlineText, draft.customSoundUri && styles.sheetInlineTextSelected]}>Choose from phone…</Text>
-                    {draft.customSoundUri && <Text style={styles.sheetInlineCheck}>✓</Text>}
-                  </TouchableOpacity>
                 </View>}
 
                 <TouchableOpacity onPress={() => setExpandedEditorSection(expandedEditorSection === 'task' ? null : 'task')} style={[styles.sheetOptionRow, styles.sheetOptionDivider]}>
-                  <View style={styles.sheetOptionIcon}><Text style={styles.sheetOptionGlyph}>{TASKS.find((task) => task.name === draft.task)?.icon ?? '∑'}</Text></View>
+                  <View style={styles.sheetOptionIcon}><Text style={styles.sheetOptionGlyph}>{TASKS.find((task) => task.task === draft.task)?.icon ?? '!'}</Text></View>
                   <View style={styles.sheetOptionCopy}><Text style={styles.sheetOptionTitle}>Wake-Up Task</Text><Text style={styles.sheetOptionSubtitle}>{taskLabel(draft.task, draft)}</Text></View>
                   <Text style={styles.sheetChevron}>{expandedEditorSection === 'task' ? '⌄' : '›'}</Text>
                 </TouchableOpacity>
-                {expandedEditorSection === 'task' && TASKS.map((task) => {
-                  const selected = draft.task === task.name;
-                  return (
-                    <TouchableOpacity key={task.name} onPress={() => selectTask(task.name)} style={styles.sheetInlineOption}>
-                      <Text style={[styles.sheetInlineText, selected && styles.sheetInlineTextSelected]}>{taskLabel(task.name, draft)}</Text>
-                      {selected ? <Text style={styles.sheetInlineCheck}>✓</Text> : null}
-                    </TouchableOpacity>
-                  );
-                })}
-                {expandedEditorSection === 'task' && draft.task === 'Math' && <View style={styles.sheetDifficulty}>{(['Easy', 'Medium', 'Hard'] as MathDifficulty[]).map((difficulty) => <TouchableOpacity key={difficulty} onPress={() => setDraft((current) => ({ ...current, mathDifficulty: difficulty }))} style={[styles.sheetDifficultyButton, draft.mathDifficulty === difficulty && styles.sheetDifficultySelected]}><Text style={[styles.sheetDifficultyText, draft.mathDifficulty === difficulty && styles.sheetDifficultyTextSelected]}>{difficulty}</Text></TouchableOpacity>)}</View>}
-                {expandedEditorSection === 'task' && draft.task === 'Shake' && <View style={styles.sheetDifficulty}>{[50, 100, 200].map((count) => <TouchableOpacity key={count} onPress={() => setDraft((current) => ({ ...current, shakeCount: count }))} style={[styles.sheetDifficultyButton, draft.shakeCount === count && styles.sheetDifficultySelected]}><Text style={[styles.sheetDifficultyText, draft.shakeCount === count && styles.sheetDifficultyTextSelected]}>{count}</Text></TouchableOpacity>)}</View>}
-                {expandedEditorSection === 'task' && draft.task === 'Yell to Wake' && (
-                  <View style={styles.sheetDifficulty}>
-                    {(['loud', 'whisper'] as YellMode[]).map((mode) => (
-                      <TouchableOpacity
-                        key={mode}
-                        onPress={() => setDraft((current) => ({ ...current, yellMode: mode }))}
-                        style={[styles.sheetDifficultyButton, (draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode) === mode && styles.sheetDifficultySelected]}
-                      >
-                        <Text style={[styles.sheetDifficultyText, (draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode) === mode && styles.sheetDifficultyTextSelected]}>
-                          {mode.toUpperCase()}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                {expandedEditorSection === 'task'
+                  && !challengeTypeForTask(draft.task)
+                  && (
+                  <View style={styles.legacyChallengeNotice}>
+                    <Text style={styles.legacyChallengeNoticeTitle}>THIS MISSION IS RETIRED</Text>
+                    <Text style={styles.legacyChallengeNoticeBody}>
+                      Choose a current mission below before this saved alarm can ring its challenge.
+                    </Text>
                   </View>
                 )}
-                {expandedEditorSection === 'task' && (draft.task === 'Yell to Wake' || draft.task === 'Face Challenge') && (
-                  <View style={styles.objectPickerPanel}>
-                    <Text style={styles.qrLinkLabel}>FALLBACK IF NEEDED</Text>
-                    <Text style={styles.objectPickerHint}>Permission, device, or time limit issues switch to this challenge.</Text>
-                    <View style={styles.sheetDifficulty}>
-                      {(['Math', 'Memory'] as FallbackTask[]).map((task) => (
+                {expandedEditorSection === 'task' && (
+                  <View style={styles.missionGrid}>
+                    {TASKS.map((mission) => {
+                      const selected = draft.task === mission.task;
+                      return (
                         <TouchableOpacity
-                          key={task}
-                          onPress={() => setDraft((current) => ({ ...current, fallbackTask: task }))}
-                          style={[styles.sheetDifficultyButton, (draft.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask) === task && styles.sheetDifficultySelected]}
+                          key={mission.type}
+                          accessibilityRole="radio"
+                          accessibilityState={{ selected }}
+                          onPress={() => selectTask(mission.task)}
+                          style={[styles.missionCard, selected && styles.missionCardSelected]}
                         >
-                          <Text style={[styles.sheetDifficultyText, (draft.fallbackTask ?? WAKE_CHALLENGE_CONFIG.fallbackTask) === task && styles.sheetDifficultyTextSelected]}>
-                            {task}
-                          </Text>
+                          <View style={[styles.missionIconWrap, selected && styles.missionIconWrapSelected]}>
+                            <Text style={[styles.missionIcon, selected && styles.missionIconSelected]}>{mission.icon}</Text>
+                          </View>
+                          <Text style={styles.missionTitle}>{mission.title}</Text>
+                          <Text style={styles.missionDescription}>{mission.description}</Text>
+                          <View style={styles.missionMetaRow}>
+                            <Text style={styles.missionMeta}>{mission.difficulty.toUpperCase()}</Text>
+                            <Text style={styles.missionMeta}>{mission.duration}</Text>
+                          </View>
+                          {selected && <Text style={styles.missionSelectedMark}>✓</Text>}
                         </TouchableOpacity>
-                      ))}
+                      );
+                    })}
+                  </View>
+                )}
+                {expandedEditorSection === 'task' && draft.task === 'Shake Your Phone' && (
+                  <View style={styles.challengeSettings}>
+                    <Text style={styles.challengeSettingsLabel}>SHAKE TARGET</Text>
+                    <View style={styles.sheetDifficulty}>
+                      {[10, 25, 50, 100, 200].map((count) => {
+                        const selected = draft.challengeConfig?.type === 'shake_phone'
+                          ? draft.challengeConfig.targetCount === count
+                          : count === 25;
+                        return (
+                          <TouchableOpacity
+                            key={count}
+                            onPress={() => setDraft((current) => ({
+                              ...current,
+                              challengeConfig: { type: 'shake_phone', targetCount: count as 10 | 25 | 50 | 100 | 200 },
+                            }))}
+                            style={[styles.sheetDifficultyButton, selected && styles.sheetDifficultySelected]}
+                          >
+                            <Text style={[styles.sheetDifficultyText, selected && styles.sheetDifficultyTextSelected]}>{count}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
                     </View>
                   </View>
                 )}
-                {expandedEditorSection === 'task' && (draft.task === 'Yell to Wake' || draft.task === 'Face Challenge') && (
-                  <View style={styles.objectPickerPanel}>
-                    <ActionButton label={challengePreviewing ? 'STOP PREVIEW' : 'TRY IT NOW'} onPress={() => setChallengePreviewing((active) => !active)} compact />
-                    {challengePreviewing && draft.task === 'Yell to Wake' && (
-                      <YellChallenge
-                        key={`preview-${draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}`}
-                        active
-                        preview
-                        mode={draft.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}
-                        trackEvent={trackEvent}
-                        onComplete={() => {
-                          setChallengePreviewing(false);
-                          Alert.alert('Preview complete', 'Yell to Wake is ready to use.');
-                        }}
-                        onFallback={(reason) => {
-                          setChallengePreviewing(false);
-                          Alert.alert('Preview unavailable', `The microphone challenge could not continue (${reason}). Your alarm will use its selected fallback if needed.`);
-                        }}
-                      />
-                    )}
-                    {challengePreviewing && draft.task === 'Face Challenge' && (
-                      <FaceChallenge
-                        key="face-preview"
-                        active
-                        preview
-                        trackEvent={trackEvent}
-                        onComplete={() => {
-                          setChallengePreviewing(false);
-                          Alert.alert('Preview complete', 'Face Challenge is ready to use.');
-                        }}
-                        onFallback={(reason) => {
-                          setChallengePreviewing(false);
-                          Alert.alert('Preview unavailable', `The camera challenge could not continue (${reason}). Your alarm will use its selected fallback if needed.`);
-                        }}
-                      />
-                    )}
+                {expandedEditorSection === 'task' && draft.task === 'Push-up Challenge' && (
+                  <View style={styles.challengeSettings}>
+                    <Text style={styles.challengeSettingsLabel}>PUSH-UP TARGET</Text>
+                    <View style={styles.sheetDifficulty}>
+                      {[5, 10, 15, 20].map((count) => {
+                        const selected = draft.challengeConfig?.type === 'push_up'
+                          ? draft.challengeConfig.targetCount === count
+                          : count === 10;
+                        return (
+                          <TouchableOpacity
+                            key={count}
+                            onPress={() => setDraft((current) => ({
+                              ...current,
+                              challengeConfig: { type: 'push_up', targetCount: count as 5 | 10 | 15 | 20 },
+                            }))}
+                            style={[styles.sheetDifficultyButton, selected && styles.sheetDifficultySelected]}
+                          >
+                            <Text style={[styles.sheetDifficultyText, selected && styles.sheetDifficultyTextSelected]}>{count}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
                   </View>
                 )}
-                {expandedEditorSection === 'task' && draft.task === 'QR scan' && <View style={styles.qrLinkPanel}>
-                  <Text style={styles.qrLinkLabel}>{draft.qrCode ? 'QR CODE LINKED' : 'LINK YOUR PHYSICAL QR CODE'}</Text>
-                  {linkingQr && cameraPermission?.granted ? <><CameraView style={styles.linkCamera} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={({ data }) => { if (!data) return; setDraft((current) => ({ ...current, qrCode: data })); setLinkingQr(false); setQrError(''); }} /><TouchableOpacity onPress={() => setLinkingQr(false)}><Text style={styles.cancelScan}>CANCEL SCAN</Text></TouchableOpacity></> : <ActionButton label={draft.qrCode ? 'RE-LINK QR CODE' : 'SCAN YOUR QR CODE'} onPress={beginQrLinking} compact />}
-                  {!!qrError && <Text style={styles.qrError}>{qrError}</Text>}
-                </View>}
-                {expandedEditorSection === 'task' && draft.task === 'Object Hunt' && <View style={styles.objectPickerPanel}>
-                   <Text style={styles.qrLinkLabel}>CHOOSE OBJECTS TO FIND</Text>
-                   <Text style={styles.objectPickerHint}>Wayykup will shuffle one target when the alarm rings and identify it from a camera photo.</Text>
-                   <View style={styles.huntItemGrid}>
-                     {HUNT_ITEMS.map((item) => {
-                       const selected = draft.huntItems?.includes(item.name) ?? false;
-                       return (
-                         <TouchableOpacity
-                           key={item.name}
-                           accessibilityRole="checkbox"
-                           accessibilityState={{ selected }}
-                           onPress={() => {
-                             const currentTargets = draft.huntItems ?? [];
-                             const nextTargets = selected
-                               ? currentTargets.filter((target) => target !== item.name)
-                               : [...currentTargets, item.name];
-                             setDraft((current) => ({
-                               ...current,
-                               huntItems: nextTargets,
-                               huntTarget: selected
-                                 ? nextTargets[0] ?? ''
-                                 : item.name,
-                             }));
-                           }}
-                           style={[styles.huntItemOption, selected && styles.huntItemOptionSelected]}
-                         >
-                           <Text style={styles.huntItemEmoji}>{item.image}</Text>
-                           <Text style={[styles.huntItemName, selected && styles.huntItemNameSelected]}>{item.name}</Text>
-                           {selected && <Text style={styles.huntItemCheck}>✓</Text>}
-                         </TouchableOpacity>
-                       );
-                     })}
-                   </View>
-                </View>}
+                {expandedEditorSection === 'task' && draft.task === 'Object Hunt' && (
+                  <View style={styles.challengeSettings}>
+                    <Text style={styles.challengeSettingsLabel}>OBJECT HUNT DIFFICULTY</Text>
+                    <View style={styles.sheetDifficulty}>
+                      {(['easy', 'medium', 'hard'] as const).map((difficulty) => {
+                        const selected = draft.challengeConfig?.type === 'object_hunt'
+                          ? draft.challengeConfig.difficulty === difficulty
+                          : false;
+                        return (
+                          <TouchableOpacity
+                            key={difficulty}
+                            onPress={() => setDraft((current) => ({
+                              ...current,
+                              challengeConfig: {
+                                type: 'object_hunt',
+                                difficulty,
+                                targetObject: huntTargetsForDifficulty(difficulty)[0],
+                              },
+                            }))}
+                            style={[styles.sheetDifficultyButton, selected && styles.sheetDifficultySelected]}
+                          >
+                            <Text style={[styles.sheetDifficultyText, selected && styles.sheetDifficultyTextSelected]}>{difficulty.toUpperCase()}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.challengeSettingsLabel}>SELECT THE TARGET OBJECT</Text>
+                    <View style={styles.sheetDifficulty}>
+                      {huntTargetsForDifficulty(draft.challengeConfig?.type === 'object_hunt' ? draft.challengeConfig.difficulty : 'easy').map((target) => {
+                        const selected = draft.challengeConfig?.type === 'object_hunt'
+                          && draft.challengeConfig.targetObject === target;
+                        return (
+                          <TouchableOpacity
+                            key={target}
+                            onPress={() => setDraft((current) => ({
+                              ...current,
+                              challengeConfig: current.challengeConfig?.type === 'object_hunt'
+                                ? { ...current.challengeConfig, targetObject: target }
+                                : { type: 'object_hunt', difficulty: 'easy', targetObject: target },
+                            }))}
+                            style={[styles.sheetDifficultyButton, selected && styles.sheetDifficultySelected]}
+                          >
+                            <Text style={[styles.sheetDifficultyText, selected && styles.sheetDifficultyTextSelected]}>{target.toUpperCase()}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                )}
+                {expandedEditorSection === 'task' && draft.task === 'Yell to Stop' && (
+                  <View style={styles.challengeSettings}>
+                    <Text style={styles.challengeSettingsLabel}>SAY THIS PHRASE TO STOP</Text>
+                    <View style={styles.sheetDifficulty}>
+                    {(["I'M AWAKE!", 'GOOD MORNING!', "I'M UP!", 'WAKE UP!'] as const).map((phrase) => (
+                      <TouchableOpacity
+                        key={phrase}
+                        onPress={() => setDraft((current) => ({
+                          ...current,
+                          challengeConfig: { type: 'yell_to_stop', phrase, requiredCompletions: 1 },
+                        }))}
+                        style={[styles.sheetDifficultyButton, draft.challengeConfig?.type === 'yell_to_stop' && draft.challengeConfig.phrase === phrase && styles.sheetDifficultySelected]}
+                      >
+                        <Text style={[styles.sheetDifficultyText, draft.challengeConfig?.type === 'yell_to_stop' && draft.challengeConfig.phrase === phrase && styles.sheetDifficultyTextSelected]}>
+                          {phrase}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                    </View>
+                    <Text style={styles.objectPickerHint}>Wayykup must recognize your chosen phrase. Background noise alone never completes this mission.</Text>
+                  </View>
+                )}
               </View>
 
               <TouchableOpacity onPress={() => setDraft((current) => ({ ...current, savage: !current.savage }))} style={styles.sheetSavageRow}>
@@ -3005,18 +3258,85 @@ export default function App() {
     );
   };
 
+  const renderRinging = () => (
+    <SafeAreaView style={styles.ringingScreen}>
+      <View style={styles.ringingTop}>
+        <View style={styles.liveAlarmDot} />
+        <Text style={styles.ringingStatus}>WAYYKUP ALARM · RINGING</Text>
+      </View>
+      <View style={styles.ringingCenter}>
+        <Text style={styles.ringingEyebrow}>ALARM SOUND · {alarmSoundName(lastAlarm.sound).toUpperCase()}</Text>
+        <Text style={styles.ringingTime}>{now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
+        <Text style={styles.ringingScheduledTime}>SCHEDULED FOR {formatClock12Hour(lastAlarm.time)}</Text>
+        <Text style={styles.ringingTask}>{lastAlarm.task.toUpperCase()} WAKE-UP CHALLENGE</Text>
+        <Text style={styles.ringingHint}>Swipe to stop the ringing and start your challenge. The alarm will keep playing while you complete it.</Text>
+      </View>
+      <GestureDetector gesture={ringingSwipeGesture}>
+        <View
+          accessibilityRole="button"
+          accessibilityActions={[{ name: 'activate', label: 'Start wake-up challenge' }]}
+          onAccessibilityAction={(event) => {
+            if (event.nativeEvent.actionName === 'activate') void activateChallengeAfterSwipe();
+          }}
+          accessibilityLabel="Swipe right to start your wake-up challenge. The alarm will keep ringing."
+          style={styles.ringingSwipeTrack}
+        >
+          <Text style={styles.ringingSwipeLabel}>SWIPE RIGHT TO START</Text>
+          <ReanimatedAnimated.View style={[styles.ringingSwipeThumb, ringingSwipeThumbStyle]}>
+            <Text style={styles.ringingSwipeGlyph}>››</Text>
+          </ReanimatedAnimated.View>
+        </View>
+      </GestureDetector>
+      <Text style={styles.ringingFooter}>CHALLENGE REQUIRED · AUDIO STAYS ON</Text>
+    </SafeAreaView>
+  );
+
+  const renderWakeSuccess = () => (
+    <SafeAreaView style={styles.wakeSuccessScreen}>
+      <WayykupIcon size={64} />
+      <Text style={styles.wakeSuccessEyebrow}>WAKE-UP VERIFIED</Text>
+      <Text style={styles.wakeSuccessTitle}>GOOD MORNING!</Text>
+      <Text style={styles.wakeSuccessMessage}>You've completed your wake-up challenge. Time to start your day!</Text>
+      <Text style={styles.wakeSuccessDuration}>CHALLENGE TIME · {challengeDurationSeconds} SECONDS</Text>
+      {!!statsError && <Text style={styles.wakeSuccessWarning}>{statsError}</Text>}
+      <TouchableOpacity
+        accessibilityRole="button"
+        onPress={() => setScreen('home')}
+        style={styles.wakeSuccessButton}
+      >
+        <Text style={styles.wakeSuccessButtonText}>CONTINUE TO WAYYKUP</Text>
+      </TouchableOpacity>
+    </SafeAreaView>
+  );
+
   const renderAlarm = () => {
-    const mathChallenge = MATH_CHALLENGES[lastAlarm.mathDifficulty];
-    const huntTarget = activeHuntTarget ?? lastAlarm.huntTarget ?? lastAlarm.huntItems?.[0] ?? 'your object';
-    const submitAnswer = () => {
-      if (Number(answer) === mathChallenge.answer) {
-        setMathAttempts((count) => count + 1);
-        setMathCorrect((count) => count + 1);
-        finishChallenge(true);
-      } else {
-        recordChallengeFailure(true);
-        setAnswer('');
+    const challengeConfig = lastAlarm.challengeConfig;
+    const huntTarget = challengeConfig.type === 'object_hunt' ? challengeConfig.targetObject : 'your object';
+    const yellPhrase = challengeConfig.type === 'yell_to_stop' ? challengeConfig.phrase : "I'M AWAKE!";
+    const reshuffleHuntTarget = () => {
+      if (
+        !activeOccurrenceId.current
+        || activeChallengeAlarmId.current !== lastAlarm.id
+        || alarmSessionState.current.state !== 'challenge_active'
+        || challengeConfig.type !== 'object_hunt'
+      ) return;
+      const targetObject = chooseHuntTargetForDifficulty(
+        challengeConfig.difficulty,
+        Math.random,
+        challengeConfig.targetObject,
+      );
+      if (!targetObject) {
+        Alert.alert('No alternate target', 'There is no other valid target at this difficulty.');
+        return;
       }
+      setLastAlarm((current) => (
+        current.id !== lastAlarm.id || current.challengeConfig.type !== 'object_hunt'
+          ? current
+          : { ...current, challengeConfig: { ...current.challengeConfig, targetObject } }
+      ));
+      setHuntRecognized(false);
+      setHuntRecognitionMessage('');
+      trackEvent('object_hunt_target_reshuffled', { alarm_id: lastAlarm.id, target: targetObject });
     };
     const allowObjectHuntCamera = () => {
       requestCameraPermission()
@@ -3029,6 +3349,28 @@ export default function App() {
           setHuntRecognitionMessage('CAMERA ACCESS IS UNAVAILABLE. CHECK YOUR DEVICE SETTINGS.');
         });
     };
+    if (lastAlarm.task === 'Object Hunt') {
+      return (
+        <ObjectHuntScreen
+          alarmTime={lastAlarm.time}
+          alarmLabel={lastAlarm.label}
+          target={huntTarget}
+          difficulty={challengeConfig.type === 'object_hunt' ? challengeConfig.difficulty : 'easy'}
+          recognized={huntRecognized}
+          permissionGranted={cameraPermission?.granted === true}
+          permissionMessage={huntRecognitionMessage}
+          onRequestPermission={allowObjectHuntCamera}
+          onRecognized={(target) => {
+            setHuntRecognized(true);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+              .catch((error: unknown) => console.warn('Object-recognition haptic failed:', error));
+            trackEvent('object_hunt_object_recognized', { target });
+          }}
+          onFailedAttempt={recordChallengeFailure}
+          onReshuffle={reshuffleHuntTarget}
+        />
+      );
+    }
     return (
       <SafeAreaView style={styles.alarmScreen}>
         <ScrollView contentContainerStyle={styles.alarmContent} keyboardShouldPersistTaps="handled">
@@ -3037,204 +3379,42 @@ export default function App() {
           <View style={styles.alarmRule}><View style={styles.ruleAccent} /><Text style={styles.alarmRuleText}>GET UP. GET IT DONE.</Text></View>
           <View style={styles.challengeCard}>
             <View style={styles.challengeHeader}><Text style={styles.challengeLabel}>YOUR CHALLENGE</Text><Tag dark>{lastAlarm.task.toUpperCase()}</Tag></View>
-            {lastAlarm.task === 'Math' && (
-              <View style={styles.challengeBody}>
-                <Text style={styles.challengePrompt}>NO CALCULATOR.{'\n'}NO EXCUSES.</Text>
-                <Text style={styles.mathProblem}>{mathChallenge.equation} = ?</Text>
-                <TextInput value={answer} onChangeText={setAnswer} keyboardType="number-pad" placeholder="YOUR ANSWER" placeholderTextColor="#6F6C68" style={styles.answerInput} returnKeyType="done" onSubmitEditing={submitAnswer} />
-                {wrongAnswers > 0 && <Text style={styles.wrongAnswer}>WRONG. VOLUME UP × {wrongAnswers + 1}</Text>}
-                <ActionButton label="SUBMIT ANSWER" onPress={submitAnswer} />
-              </View>
+            {lastAlarm.task === 'Push-up Challenge' && (
+              <PushUpChallenge
+                active={screen === 'alarm'}
+                targetCount={challengeConfig.type === 'push_up' ? challengeConfig.targetCount : 10}
+                onComplete={() => { void finishChallenge(); }}
+                onError={(reason) => setAlarmFallbackReason(reason)}
+              />
             )}
-            {lastAlarm.task === 'Object Hunt' && (
-              <View style={styles.challengeBody}>
-                {huntRecognized ? (
-                  <View
-                    accessibilityRole="summary"
-                    accessibilityLabel={`Object recognized: ${huntTarget}`}
-                    style={styles.objectRecognizedCard}
-                  >
-                    <Text style={styles.objectRecognizedCheck}>✓</Text>
-                    <Text style={styles.objectRecognizedTitle}>OBJECT RECOGNIZED</Text>
-                    <Text style={styles.objectRecognizedName}>{huntTarget.toUpperCase()}</Text>
-                  </View>
-                ) : cameraPermission?.granted ? (
-                  <ObjectHuntCamera
-                    target={huntTarget}
-                    onRecognized={(target) => {
-                      setHuntRecognized(true);
-                      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
-                        .catch((error: unknown) => console.warn('Object-recognition haptic failed:', error));
-                      trackEvent('object_hunt_object_recognized', { target });
-                    }}
-                    onFailedAttempt={recordChallengeFailure}
-                  />
-                ) : (
-                  <TouchableOpacity onPress={allowObjectHuntCamera} style={styles.cameraPermissionPrompt}>
-                    <Text style={styles.scanGlyph}>⌕</Text><Text style={styles.shakeButtonText}>ALLOW CAMERA ACCESS</Text>
-                  </TouchableOpacity>
-                )}
-                {!huntRecognized && <Text style={styles.challengePrompt}>FIND YOUR {huntTarget.toUpperCase()}.{'\n'}CENTER IT AND TAKE A PHOTO.</Text>}
-                {!!huntRecognitionMessage && !cameraPermission?.granted && (
-                  <Text style={styles.huntRecognitionMessage}>{huntRecognitionMessage}</Text>
-                )}
-              </View>
-            )}
-            {lastAlarm.task === 'Toothbrush' && (
-              <View style={styles.challengeBody}>
-                <Text style={styles.challengePrompt}>BRUSH FOR TWO MINUTES.</Text>
-                <Text style={styles.brushingTimer}>
-                  {Math.floor(brushingSeconds / 60)}:{String(brushingSeconds % 60).padStart(2, '0')}
-                </Text>
-                <View style={styles.shakeMeter}>
-                  <View style={[styles.shakeFill, { width: `${((BRUSHING_DURATION_SECONDS - brushingSeconds) / BRUSHING_DURATION_SECONDS) * 100}%` }]} />
-                </View>
-                <Text style={styles.simulationNote}>KEEP BRUSHING. THE ALARM STOPS WHEN THE TIMER ENDS.</Text>
-              </View>
-            )}
-            {(lastAlarm.task === 'Push-ups' || lastAlarm.task === 'Squats') && (
-              <View style={styles.challengeBody}>
-                <Text style={styles.challengePrompt}>COMPLETE TEN{'\n'}CONTROLLED REPS.</Text>
-                <View style={styles.shakeMeter}>
-                  <View style={[styles.shakeFill, { width: `${(exerciseReps / EXERCISE_REP_TARGET) * 100}%` }]} />
-                </View>
-                <Text style={styles.shakeCount}>
-                  {String(exerciseReps).padStart(2, '0')} <Text style={styles.shakeTotal}>/ {EXERCISE_REP_TARGET}</Text>
-                </Text>
-                <Text style={styles.simulationNote}>
-                  {sensorAvailable ? 'KEEP YOUR PHONE SECURE ON YOUR BODY AND MOVE THROUGH EACH REP.' : 'MOTION SENSING IS UNAVAILABLE ON THIS DEVICE.'}
-                </Text>
-                {!sensorAvailable && <TouchableOpacity onPress={() => setExerciseReps((count) => Math.min(count + 1, EXERCISE_REP_TARGET))} style={styles.shakeButton}><Text style={styles.shakeButtonText}>LOG COMPLETED REP</Text></TouchableOpacity>}
-                {__DEV__ && sensorAvailable && <TouchableOpacity onPress={() => setExerciseReps((count) => Math.min(count + 1, EXERCISE_REP_TARGET))} style={styles.shakeButton}><Text style={styles.shakeButtonText}>SIMULATE ONE REP</Text></TouchableOpacity>}
-              </View>
-            )}
-            {lastAlarm.task === 'Shake' && (
+            {lastAlarm.task === 'Shake Your Phone' && challengeConfig.type === 'shake_phone' && (
               <View style={styles.challengeBody}>
                 <Text style={styles.challengePrompt}>SHAKE IT OFF.</Text>
-                <View style={styles.shakeMeter}><View style={[styles.shakeFill, { width: `${Math.min(shakeCount / lastAlarm.shakeCount, 1) * 100}%` }]} /></View>
-                <Text style={styles.shakeCount}>{String(Math.min(shakeCount, lastAlarm.shakeCount)).padStart(2, '0')} <Text style={styles.shakeTotal}>/ {lastAlarm.shakeCount}</Text></Text>
+                <View style={styles.shakeMeter}><View style={[styles.shakeFill, { width: `${Math.min(shakeCount / challengeConfig.targetCount, 1) * 100}%` }]} /></View>
+                <Text style={styles.shakeCount}>{String(Math.min(shakeCount, challengeConfig.targetCount)).padStart(2, '0')} <Text style={styles.shakeTotal}>/ {challengeConfig.targetCount}</Text></Text>
                 <Text style={styles.simulationNote}>{sensorAvailable ? 'SHAKE YOUR PHONE TO FILL THE METER.' : 'Accelerometer is unavailable on this device.'}</Text>
-                {__DEV__ && <TouchableOpacity onPress={() => setShakeCount((count) => Math.min(count + 5, lastAlarm.shakeCount))} style={styles.shakeButton}><Text style={styles.shakeButtonIcon}>↯</Text><Text style={styles.shakeButtonText}>SIMULATE FIVE SHAKES</Text></TouchableOpacity>}
-              </View>
-            )}
-            {lastAlarm.task === 'QR scan' && (
-              <View style={styles.challengeBody}>
-                {cameraPermission?.granted ? (
-                  <CameraView
-                    style={styles.alarmCamera}
-                    barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-                    onBarcodeScanned={({ data }) => {
-                      if (qrScanned) return;
-                      setQrScanned(true);
-                      if (data === lastAlarm.qrCode) finishChallenge();
-                      else {
-                        setQrError('That is not your linked QR code. Keep looking.');
-                        setTimeout(() => setQrScanned(false), 1200);
-                      }
-                    }}
-                  />
-                ) : (
-                  <TouchableOpacity onPress={() => {
-                    requestCameraPermission()
-                      .then((permission) => {
-                        if (!permission.granted) setQrError('Camera permission is needed to scan your linked code.');
-                      })
-                      .catch((error: unknown) => {
-                        console.error('Camera permission request failed.', error);
-                        setQrError('Camera access is unavailable on this device.');
-                      });
-                  }} style={styles.cameraPermissionPrompt}>
-                    <Text style={styles.scanGlyph}>▦</Text><Text style={styles.shakeButtonText}>ALLOW CAMERA ACCESS</Text>
-                  </TouchableOpacity>
-                )}
-                <Text style={styles.challengePrompt}>FIND YOUR QR CODE{'\n'}TO STOP THE ALARM.</Text>
-                {!!qrError && <Text style={styles.qrError}>{qrError}</Text>}
-              </View>
-            )}
-            {lastAlarm.task === 'Memory' && (
-              <View style={styles.challengeBody}>
-                <Text style={styles.challengePrompt}>REPEAT THE{'\n'}SEQUENCE.</Text>
-                <View style={styles.memoryPattern}>{['1', '3', '2'].map((digit, index) => <View key={digit} style={[styles.memoryTile, index === 1 && memorySequenceVisible && styles.memoryTileActive]}><Text style={[styles.memoryDigit, index === 1 && memorySequenceVisible && styles.memoryDigitActive]}>{memorySequenceVisible ? digit : '·'}</Text></View>)}</View>
-                <Text style={styles.simulationNote}>ENTER THE SEQUENCE: {memoryEntry || '—'}</Text>
-                <View style={styles.memoryKeypad}>{['1', '2', '3'].map((digit) => <TouchableOpacity key={digit} onPress={() => {
-                  const nextEntry = `${memoryEntry}${digit}`;
-                  if (nextEntry.length === 3) {
-                    if (nextEntry === '132') finishChallenge();
-                    else {
-                      setMemoryEntry('');
-                      recordChallengeFailure();
-                    }
-                  } else {
-                    setMemoryEntry(nextEntry);
-                  }
-                }} style={styles.memoryKey}><Text style={styles.memoryKeyText}>{digit}</Text></TouchableOpacity>)}</View>
-                {wrongAnswers > 0 && <Text style={styles.wrongAnswer}>WRONG SEQUENCE. TRY AGAIN.</Text>}
               </View>
             )}
             {alarmFallbackReason && (
               <Text style={styles.simulationNote}>
-                FALLBACK ACTIVE · {alarmFallbackReason === 'alarm_audio_unavailable' && Platform.OS === 'ios'
+                MISSION NEEDS ATTENTION · {alarmFallbackReason === 'alarm_audio_unavailable' && Platform.OS === 'ios'
                   ? 'IOS ALARM AUDIO CANNOT BE MUTED SAFELY'
                   : alarmFallbackReason.replace(/_/g, ' ').toUpperCase()}
               </Text>
             )}
-            {lastAlarm.task === 'Yell to Wake' && (
+            {lastAlarm.task === 'Yell to Stop' && (
               <YellChallenge
-                key={`alarm-${lastAlarm.id}-${lastAlarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}`}
+                key={`alarm-${lastAlarm.id}-${yellPhrase}`}
                 active={screen === 'alarm'}
-                mode={lastAlarm.yellMode ?? WAKE_CHALLENGE_CONFIG.yell.defaultMode}
-                onAlarmAudibleChange={async (audible) => {
-                  if (!activeYellAlarm.current) return;
-                  setYellAlarmAudible(audible);
-                  if (Platform.OS === 'ios' && activeOccurrenceId.current) {
-                    throw new Error('The active iOS AlarmKit sound cannot be muted by the current alarm integration.');
-                  }
-                  if (Platform.OS === 'android' && activeOccurrenceId.current) {
-                    await setAlarmAudioDucked(!audible, WAKE_CHALLENGE_CONFIG.yell.alarmFadeMs);
-                  }
-                }}
+                phrase={yellPhrase}
                 trackEvent={trackEvent}
                 onComplete={() => { void finishChallenge(); }}
-                onFallback={(reason) => switchToChallengeFallback(reason)}
-              />
-            )}
-            {lastAlarm.task === 'Face Challenge' && (
-              <FaceChallenge
-                key={`alarm-${lastAlarm.id}`}
-                active={screen === 'alarm'}
-                trackEvent={trackEvent}
-                onComplete={() => { void finishChallenge(); }}
-                onFallback={(reason) => switchToChallengeFallback(reason)}
+                onError={(reason) => setAlarmFallbackReason(reason)}
               />
             )}
           </View>
-          {lastAlarm.savage && <TouchableOpacity onPress={snoozeAlarm} style={styles.snoozeButton}><Text style={styles.snoozeText}>SNOOZE 5 MIN · VOLUME PENALTY +{snoozeLevel + 1}</Text></TouchableOpacity>}
-          <TouchableOpacity accessibilityRole="button" onPress={emergencyBypass} style={styles.emergencyBypass}>
-            <Text style={styles.emergencyBypassText}>EMERGENCY BYPASS</Text>
-          </TouchableOpacity>
           <View style={styles.alarmScreenFoot}><WayykupIcon size={18} style={styles.alarmFootMark} /><Text style={styles.alarmFootText}>NO EXIT UNTIL IT’S DONE.</Text></View>
         </ScrollView>
-        <Modal
-          visible={challengeShuffleVisible}
-          transparent
-          animationType="fade"
-          statusBarTranslucent
-          onRequestClose={() => {}}
-        >
-          <View style={styles.challengeShuffleOverlay} accessibilityViewIsModal accessibilityLabel="Challenge shuffle in progress">
-            <Text style={styles.challengeShuffleEyebrow}>WAKE-UP CHALLENGE</Text>
-            <Text style={styles.challengeShuffleTitle}>SHUFFLING OBJECTS</Text>
-            <View style={styles.challengeShuffleCard}>
-              <Text style={styles.challengeShuffleEmoji}>
-                {HUNT_ITEMS.find((item) => item.name === shuffleDisplayTarget)?.image ?? '⌕'}
-              </Text>
-              <Text style={styles.challengeShuffleName}>
-                {(shuffleDisplayTarget ?? 'GET READY').toUpperCase()}
-              </Text>
-            </View>
-            <Text style={styles.challengeShuffleHint}>THE ALARM STAYS ON UNTIL WAYYKUP RECOGNIZES YOUR TARGET.</Text>
-          </View>
-        </Modal>
         <StatusBar barStyle="light-content" />
       </SafeAreaView>
     );
@@ -3333,7 +3513,7 @@ export default function App() {
     try {
       const permission = await requestCameraPermission();
       if (!permission.granted) {
-        showSettingsNotice('Camera access is off', 'Allow camera access in your device settings to use QR scanning.');
+        showSettingsNotice('Camera access is off', 'Allow camera access in your device settings to use Object Hunt or Push-up Challenge.');
       }
     } catch (error) {
       console.error('Camera permission could not be requested from Settings.', error);
@@ -3629,8 +3809,8 @@ export default function App() {
   );
 
   const renderPlansModal = () => {
-    const annualPackage = availablePackages.find((item) => item.packageType === Purchases.PACKAGE_TYPE.ANNUAL);
-    const monthlyPackage = availablePackages.find((item) => item.packageType === Purchases.PACKAGE_TYPE.MONTHLY);
+    const annualPackage = currentOffering?.annual ?? null;
+    const monthlyPackage = currentOffering?.monthly ?? null;
     const selectedPackage = plan === 'yearly' ? annualPackage : monthlyPackage;
     const annualPrice = annualPackage?.product.price;
     const monthlyPrice = monthlyPackage?.product.price;
@@ -3656,7 +3836,7 @@ export default function App() {
           />
           <View style={[styles.plansSheet, { paddingBottom: Math.max(insets.bottom, 20) }]}>
             <View style={styles.plansSheetHandle} />
-            <TouchableOpacity
+            {annualPackage && <TouchableOpacity
               accessibilityRole="button"
               onPress={() => setPlan('yearly')}
               style={[styles.plansOption, styles.plansYearly, plan === 'yearly' && styles.plansOptionSelected]}
@@ -3670,7 +3850,7 @@ export default function App() {
                 <View style={styles.plansOptionCopy}>
                   <Text style={styles.plansOptionTitle}>Yearly Plan</Text>
                   <View style={styles.plansPriceLine}>
-                    <Text style={styles.plansPrice}>{annualPackage?.product.priceString ?? 'Unavailable'} /yr</Text>
+                    <Text style={styles.plansPrice}>{annualPackage.product.priceString} /yr</Text>
                     {!!annualPackage?.product.pricePerMonthString && (
                       <Text style={styles.plansMonthlyEquivalent}>{annualPackage.product.pricePerMonthString}/mo</Text>
                     )}
@@ -3680,8 +3860,8 @@ export default function App() {
                   {plan === 'yearly' && <View style={styles.plansRadioDot} />}
                 </View>
               </View>
-            </TouchableOpacity>
-            <TouchableOpacity
+            </TouchableOpacity>}
+            {monthlyPackage && <TouchableOpacity
               accessibilityRole="button"
               onPress={() => setPlan('monthly')}
               style={[styles.plansOption, plan === 'monthly' && styles.plansOptionSelected]}
@@ -3689,13 +3869,23 @@ export default function App() {
               <View style={styles.plansOptionBody}>
                 <View style={styles.plansOptionCopy}>
                   <Text style={styles.plansOptionTitle}>Monthly Plan</Text>
-                  <Text style={styles.plansPrice}>{monthlyPackage?.product.priceString ?? 'Unavailable'} /mo</Text>
+                  <Text style={styles.plansPrice}>{monthlyPackage.product.priceString} /mo</Text>
                 </View>
                 <View style={[styles.plansRadio, plan === 'monthly' && styles.plansRadioSelected]}>
                   {plan === 'monthly' && <View style={styles.plansRadioDot} />}
                 </View>
               </View>
-            </TouchableOpacity>
+            </TouchableOpacity>}
+            {(!annualPackage || !monthlyPackage) && (
+              <>
+                <Text accessibilityRole="alert" style={styles.plansError}>
+                  Plans are temporarily unavailable. Retry loading the current store offering.
+                </Text>
+                <TouchableOpacity accessibilityRole="button" onPress={retryRevenueCat} style={styles.proTrialPlans}>
+                  <Text style={styles.proTrialPlansText}>Retry</Text>
+                </TouchableOpacity>
+              </>
+            )}
             <View style={styles.plansCancelRow}>
               <Text style={styles.plansCheck}>✓</Text>
               <Text style={styles.plansCancelText}>No commitment, cancel anytime</Text>
@@ -3720,15 +3910,65 @@ export default function App() {
     );
   };
 
+  const activeAlarmScreen = screen === 'ringing' || screen === 'alarm' || screen === 'wakeSuccess';
+  const startupReady = startupProgressLoaded
+    && (billingStatus === 'ready' || (billingStatus === 'error' && localAppUnlocked));
   const visibleScreen = startupProgressLoaded
+    && billingStatus === 'ready'
     && !hasPremium
     && screen !== 'welcome'
     && screen !== 'proof'
     && screen !== 'paywall'
+    && !activeAlarmScreen
     ? 'paywall'
     : screen;
-  const screenContent = !startupProgressLoaded
+  const screenContent = (!startupReady && !activeAlarmScreen)
     ? <View style={styles.startupLoading}><WayykupIcon size={88} /></View>
+    : startupProgressError && !activeAlarmScreen
+      ? (
+        <View style={styles.startupLoading}>
+          <WayykupIcon size={72} />
+          <Text style={styles.startupErrorTitle}>YOUR SAVED SETUP IS SAFE</Text>
+          <Text style={styles.startupErrorMessage}>{startupProgressError}</Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            onPress={() => {
+              setStartupProgressLoaded(false);
+              setStartupProgressError('');
+              setProgressRetryCount((count) => count + 1);
+            }}
+            style={styles.startupRetryButton}
+          >
+            <Text style={styles.startupRetryText}>TRY AGAIN</Text>
+          </TouchableOpacity>
+        </View>
+      )
+      : billingStatus === 'error' && !localAppUnlocked && !activeAlarmScreen
+        ? (
+          <View style={styles.startupLoading}>
+            <WayykupIcon size={72} />
+            <Text style={styles.startupErrorTitle}>SUBSCRIPTION STATUS UNAVAILABLE</Text>
+            <Text style={styles.startupErrorMessage}>{billingError || 'Wayykup must verify your subscription before continuing.'}</Text>
+            {Boolean(REVENUECAT_API_KEY) && (
+              <>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  onPress={retryRevenueCat}
+                  style={styles.startupRetryButton}
+                >
+                  <Text style={styles.startupRetryText}>TRY AGAIN</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  onPress={() => { void restorePurchases(); }}
+                  style={styles.startupRestoreButton}
+                >
+                  <Text style={styles.startupRestoreText}>RESTORE PURCHASES</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        )
     : visibleScreen === 'welcome'
     ? <OnboardingFlow onComplete={completeOnboarding} trackEvent={trackEvent} reduceMotion={reduceMotion} />
     : visibleScreen === 'proof'
@@ -3737,8 +3977,12 @@ export default function App() {
       ? <View style={[styles.safeArea, { paddingTop: Math.max(insets.top, 12), paddingBottom: Math.max(insets.bottom, 8) }]}>{renderPaywall()}{renderPlansModal()}<StatusBar barStyle="dark-content" /></View>
         : visibleScreen === 'home' || visibleScreen === 'editor'
           ? renderHome()
+          : visibleScreen === 'ringing'
+            ? renderRinging()
           : visibleScreen === 'alarm'
             ? renderAlarm()
+            : visibleScreen === 'wakeSuccess'
+              ? renderWakeSuccess()
               : visibleScreen === 'streak'
                 ? renderStreakMoment()
                 : visibleScreen === 'stats'
@@ -3756,6 +4000,12 @@ export default function App() {
 const styles = StyleSheet.create({
   screenTransition: { flex: 1 },
   startupLoading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: PAPER },
+  startupErrorTitle: { color: INK, fontSize: 13, fontWeight: '900', letterSpacing: 1.1, textAlign: 'center', marginTop: 24 },
+  startupErrorMessage: { color: MUTED, fontSize: 14, lineHeight: 21, textAlign: 'center', marginTop: 10, marginHorizontal: 32 },
+  startupRetryButton: { minHeight: 48, minWidth: 150, alignItems: 'center', justifyContent: 'center', backgroundColor: RED, borderRadius: 8, marginTop: 24, paddingHorizontal: 24 },
+  startupRetryText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900', letterSpacing: 1 },
+  startupRestoreButton: { minHeight: 42, alignItems: 'center', justifyContent: 'center', marginTop: 8, paddingHorizontal: 20 },
+  startupRestoreText: { color: INK, fontSize: 10, fontWeight: '900', letterSpacing: 0.9 },
   safeArea: { flex: 1, backgroundColor: PAPER },
   onboarding: { flex: 1, backgroundColor: PAPER, paddingHorizontal: 26, paddingTop: 16, paddingBottom: 18, justifyContent: 'space-between' },
   onboardingTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -3818,7 +4068,6 @@ const styles = StyleSheet.create({
   proTrialTitle: { color: '#171018', fontFamily: 'Georgia', fontSize: 35, lineHeight: 40, fontWeight: '700', textAlign: 'center' },
   proTrialPrice: { color: '#171018', fontSize: 16, fontWeight: '700', textAlign: 'center', marginTop: 10 },
   proTrialBilled: { color: '#68636D', fontSize: 12, textAlign: 'center', marginTop: 3 },
-  proTrialUnavailable: { color: '#8E3B32', fontSize: 12, lineHeight: 17, textAlign: 'center', marginTop: 7 },
   proTrialSectionTitle: { width: '100%', color: '#171018', fontSize: 17, fontWeight: '700', marginTop: 24, marginBottom: 8 },
   proTrialTimeline: { width: '100%', position: 'relative' },
   proTrialTimelineLine: { position: 'absolute', top: 31, bottom: 31, left: 25, width: 2, backgroundColor: '#F2A440' },
@@ -3866,18 +4115,20 @@ const styles = StyleSheet.create({
   plansContinueText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
   plansContinueArrow: { position: 'absolute', right: 24, color: '#FFFFFF', fontSize: 34, lineHeight: 38, top: 13 },
   plansCancelNote: { color: '#85838A', fontSize: 13, fontWeight: '600', textAlign: 'center', marginTop: 14 },
-  giftOfferScreen: { flexGrow: 1, backgroundColor: '#F1F0F6', paddingHorizontal: 28, paddingTop: 32, paddingBottom: 8, justifyContent: 'space-between', alignItems: 'center' },
+  giftOfferScreen: { flexGrow: 1, backgroundColor: '#F1F0F6', paddingHorizontal: 28, paddingTop: 16, paddingBottom: 8, justifyContent: 'space-between', alignItems: 'center' },
   giftOfferScreenCompact: { paddingHorizontal: 22, paddingTop: 18, paddingBottom: 4 },
+  giftOfferHeader: { width: '100%', minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  giftOfferHeaderLabel: { color: MUTED, fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
+  giftOfferClose: { width: 42, height: 42, borderRadius: 22, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
   giftOfferTitle: { width: '100%', color: '#171018', fontFamily: 'Georgia', fontWeight: '700', textAlign: 'center' },
   giftArtworkStage: { width: '100%', maxWidth: 390, minHeight: 230, alignSelf: 'center', justifyContent: 'center', alignItems: 'center' },
   giftSparkle: { position: 'absolute', zIndex: 1, color: '#F1A21B', fontSize: 28, fontWeight: '700' },
   giftSparkleLeft: { left: '12%', top: '25%' },
   giftSparkleRight: { right: '12%', top: '38%', fontSize: 21 },
   giftOfferFooter: { width: '100%', alignItems: 'center' },
+  giftOfferTerms: { color: '#55515A', fontSize: 12, lineHeight: 18, textAlign: 'center', marginBottom: 14 },
   giftOfferClaim: { width: '100%', minHeight: 66, borderRadius: 38, backgroundColor: '#E93436', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, shadowColor: '#E93436', shadowOpacity: 0.27, shadowRadius: 13, shadowOffset: { width: 0, height: 6 }, elevation: 5 },
   giftOfferClaimText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
-  giftOfferContinue: { width: '100%', minHeight: 58, borderRadius: 34, borderWidth: 2, borderColor: '#171018', alignItems: 'center', justifyContent: 'center', marginTop: 12 },
-  giftOfferContinueText: { color: '#171018', fontSize: 16, fontWeight: '700' },
   giftOfferError: { color: '#9B2F2F', fontSize: 10, lineHeight: 14, textAlign: 'center', marginTop: 6 },
   giftOfferLegal: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', marginTop: 14, marginBottom: 2 },
   trialTitle: { color: '#171018', fontFamily: 'Georgia', fontWeight: '700', textAlign: 'center' },
@@ -3923,11 +4174,6 @@ const styles = StyleSheet.create({
   waterfallTimelineCopy: { flex: 1 },
   waterfallTimelineTitle: { color: INK, fontSize: 12, fontWeight: '800' },
   waterfallTimelineDetail: { color: MUTED, fontSize: 10, lineHeight: 16, marginTop: 3 },
-  discountCard: { marginTop: 14, backgroundColor: '#FFF7F3', borderRadius: 12, borderWidth: 1, borderColor: '#F7D8CD', padding: 14 },
-  discountBanner: { color: RED, fontSize: 8, fontWeight: '900', letterSpacing: 1.2, marginBottom: 8 },
-  discountProduct: { color: INK, fontSize: 18, fontWeight: '900' },
-  discountPrice: { color: INK, fontSize: 26, fontWeight: '900', marginTop: 4, letterSpacing: -0.8 },
-  discountDetail: { color: MUTED, fontSize: 10, lineHeight: 16, marginTop: 6 },
   waterfallActions: { marginTop: 18, gap: 7 },
   terms: { color: '#96918B', fontSize: 9, textAlign: 'center', marginTop: 10 },
   restorePurchases: { alignItems: 'center', padding: 12 },
@@ -4038,11 +4284,8 @@ const styles = StyleSheet.create({
   difficultySelected: { backgroundColor: INK },
   difficultyText: { color: '#706C66', fontSize: 8, fontWeight: '900', letterSpacing: 0.8 },
   difficultyTextSelected: { color: '#FFFFFF' },
-  qrLinkPanel: { padding: 10, backgroundColor: '#F1EFEB', borderRadius: 4, marginTop: 2 },
   objectPickerPanel: { padding: 10, backgroundColor: '#F1EFEB', borderRadius: 4, marginTop: 2 },
-  qrLinkLabel: { color: INK, fontSize: 8, fontWeight: '900', letterSpacing: 1, marginBottom: 8 },
   objectPickerHint: { color: MUTED, fontSize: 9, lineHeight: 14, marginBottom: 8 },
-  linkCamera: { width: '100%', height: 190, borderRadius: 4, overflow: 'hidden' },
   huntItemGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
   huntItemOption: { width: '23%', minHeight: 54, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#D5D1D8', borderRadius: 7, backgroundColor: '#FFFFFF', paddingHorizontal: 2 },
   huntItemOptionSelected: { borderColor: '#168A4A', backgroundColor: '#E8F8EE' },
@@ -4050,8 +4293,6 @@ const styles = StyleSheet.create({
   huntItemName: { color: '#706C66', fontSize: 7, fontWeight: '700', marginTop: 2, textAlign: 'center' },
   huntItemNameSelected: { color: '#116B3A' },
   huntItemCheck: { position: 'absolute', top: 2, right: 4, color: '#168A4A', fontSize: 9, fontWeight: '900' },
-  cancelScan: { color: RED, fontSize: 8, fontWeight: '900', textAlign: 'center', padding: 10, letterSpacing: 1 },
-  qrError: { color: '#E65B4D', fontSize: 9, fontWeight: '700', textAlign: 'center', marginVertical: 8 },
   soundOptions: { flexDirection: 'row', gap: 7 },
   soundOption: { flex: 1, minHeight: 37, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ECEAE6', borderRadius: 4 },
   soundSelected: { backgroundColor: INK },
@@ -4100,6 +4341,24 @@ const styles = StyleSheet.create({
   sheetChevron: { color: '#99999F', fontSize: 23, paddingHorizontal: 5 },
   sheetInlineOptions: { marginHorizontal: 12, backgroundColor: '#F7F7F9', borderBottomLeftRadius: 12, borderBottomRightRadius: 12, paddingHorizontal: 12 },
   sheetInlineOption: { minHeight: 43, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#E8E8EB' },
+  missionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9, paddingTop: 10 },
+  missionCard: { width: '48%', minHeight: 158, borderWidth: 1, borderColor: '#E5E8E5', borderRadius: 16, padding: 11, backgroundColor: '#FFFFFF', position: 'relative' },
+  missionCardSelected: { borderColor: '#218B57', borderWidth: 2, backgroundColor: '#F0FAF4' },
+  missionCardUnavailable: { opacity: 0.58 },
+  missionIconWrap: { width: 36, height: 36, borderRadius: 12, backgroundColor: '#F0F3F0', alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
+  missionIconWrapSelected: { backgroundColor: '#DDF3E5' },
+  missionIcon: { color: '#404742', fontSize: 22, fontWeight: '800' },
+  missionIconSelected: { color: '#16814B' },
+  missionTitle: { color: INK, fontSize: 10, fontWeight: '900', letterSpacing: 0.3 },
+  missionDescription: { color: MUTED, fontSize: 9, lineHeight: 13, marginTop: 4, minHeight: 25 },
+  missionMetaRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
+  missionMeta: { color: '#6E776F', fontSize: 7, fontWeight: '900', letterSpacing: 0.35 },
+  missionSelectedMark: { position: 'absolute', top: 10, right: 10, color: '#16814B', fontWeight: '900', fontSize: 15 },
+  challengeSettings: { backgroundColor: '#F8FAF8', borderRadius: 12, marginTop: 9, paddingVertical: 10 },
+  challengeSettingsLabel: { color: '#555E57', fontSize: 8, fontWeight: '900', letterSpacing: 1, paddingHorizontal: 12 },
+  legacyChallengeNotice: { backgroundColor: '#FFF7E6', borderRadius: 11, marginTop: 9, padding: 12 },
+  legacyChallengeNoticeTitle: { color: '#8C5C00', fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
+  legacyChallengeNoticeBody: { color: '#6F5E3F', fontSize: 10, lineHeight: 15, marginTop: 5 },
   sheetInlineText: { color: '#55555B', fontSize: 13 },
   soundPreviewButton: { color: '#FF1717', fontSize: 12, fontWeight: '800' },
   sheetInlineTextSelected: { color: '#FF1717', fontWeight: '700' },
@@ -4116,6 +4375,97 @@ const styles = StyleSheet.create({
   sheetSavageTitle: { color: '#202024', fontSize: 14, fontWeight: '700' },
   sheetSavageSubtitle: { color: '#818188', fontSize: 11, marginTop: 3 },
   sheetFootnote: { color: '#A1A1A6', fontSize: 11, textAlign: 'center', marginTop: 9 },
+  ringingScreen: { flex: 1, backgroundColor: INK, paddingHorizontal: 26, paddingTop: 18, paddingBottom: 24, justifyContent: 'space-between' },
+  ringingTop: { minHeight: 38, flexDirection: 'row', alignItems: 'center' },
+  ringingStatus: { color: '#FFFFFF', fontSize: 10, fontWeight: '900', letterSpacing: 1.3 },
+  ringingCenter: { alignItems: 'center', justifyContent: 'center', flex: 1 },
+  ringingEyebrow: { color: '#FF8585', fontSize: 10, fontWeight: '900', letterSpacing: 1.5 },
+  ringingTime: { color: '#FFFFFF', fontSize: 70, lineHeight: 82, fontWeight: '900', letterSpacing: -2, marginTop: 14 },
+  ringingScheduledTime: { color: '#C9C4C4', fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginTop: 1 },
+  ringingTask: { color: '#FF2727', fontSize: 15, fontWeight: '900', letterSpacing: 1.2, marginTop: 14 },
+  ringingHint: { color: '#C9C4C4', fontSize: 14, lineHeight: 21, textAlign: 'center', marginHorizontal: 16, marginTop: 18 },
+  ringingSwipeTrack: { height: 66, borderRadius: 33, backgroundColor: '#34312F', justifyContent: 'center', marginBottom: 8, paddingHorizontal: 6 },
+  ringingSwipeLabel: { color: '#B9B4B1', fontSize: 10, fontWeight: '900', letterSpacing: 1.2, textAlign: 'center' },
+  ringingSwipeThumb: { position: 'absolute', left: 6, width: 54, height: 54, borderRadius: 27, alignItems: 'center', justifyContent: 'center', backgroundColor: RED },
+  ringingSwipeGlyph: { color: '#FFFFFF', fontSize: 26, fontWeight: '900', letterSpacing: -5, marginRight: 4 },
+  ringingFooter: { color: '#8C8683', fontSize: 8, fontWeight: '900', letterSpacing: 1.2, textAlign: 'center', marginBottom: 8 },
+  wakeSuccessScreen: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: PAPER, paddingHorizontal: 30, paddingVertical: 28 },
+  wakeSuccessEyebrow: { color: RED, fontSize: 10, fontWeight: '900', letterSpacing: 1.8, marginTop: 26 },
+  wakeSuccessTitle: { color: INK, fontSize: 40, fontWeight: '900', letterSpacing: -1.5, marginTop: 9 },
+  wakeSuccessMessage: { color: MUTED, fontSize: 15, lineHeight: 23, textAlign: 'center', marginTop: 12, maxWidth: 310 },
+  wakeSuccessDuration: { color: INK, fontSize: 10, fontWeight: '900', letterSpacing: 1.1, marginTop: 24 },
+  wakeSuccessWarning: { color: RED, fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: 14 },
+  wakeSuccessButton: { alignSelf: 'stretch', minHeight: 56, alignItems: 'center', justifyContent: 'center', backgroundColor: RED, borderRadius: 6, marginTop: 38, paddingHorizontal: 18 },
+  wakeSuccessButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900', letterSpacing: 1.1 },
+  huntScreen: { flex: 1, backgroundColor: '#F6F8F5' },
+  huntScreenContent: { flexGrow: 1, width: '100%', maxWidth: 560, alignSelf: 'center', paddingHorizontal: 22, paddingTop: 12, paddingBottom: 28 },
+  huntMissionTop: { alignItems: 'center', paddingBottom: 21 },
+  huntLiveIndicator: { minHeight: 28, flexDirection: 'row', alignItems: 'center', alignSelf: 'center', paddingHorizontal: 11, borderRadius: 20, backgroundColor: '#E8F4EB' },
+  huntLiveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#23834E', marginRight: 7 },
+  huntLiveText: { color: '#28764A', fontSize: 9, fontWeight: '900', letterSpacing: 0.9 },
+  huntMissionEyebrow: { color: '#7A827B', fontSize: 9, fontWeight: '900', letterSpacing: 1.7, marginTop: 13 },
+  huntMissionTime: { color: '#202922', fontSize: 45, lineHeight: 52, fontWeight: '800', letterSpacing: -1.7, marginTop: 1, fontVariant: ['tabular-nums'] },
+  huntAlarmLabel: { color: '#68726A', fontSize: 12, fontWeight: '600', marginTop: 1 },
+  huntMissionMessage: { color: '#777F79', fontSize: 12, textAlign: 'center', marginTop: 6 },
+  huntChallengeHeading: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+  huntChallengeIcon: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 16, backgroundColor: '#E1F1E5', marginRight: 12 },
+  huntChallengeIconGlyph: { color: '#218B57', fontSize: 32, lineHeight: 36, fontWeight: '500' },
+  huntChallengeHeadingCopy: { flex: 1 },
+  huntChallengeTitle: { color: '#202922', fontSize: 20, fontWeight: '900', letterSpacing: 0.1 },
+  huntChallengeSubtitle: { color: '#737D75', fontSize: 12, marginTop: 3 },
+  huntTargetCard: { overflow: 'hidden', flexDirection: 'row', alignItems: 'stretch', minHeight: 154, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E7ECE7', borderRadius: 22, shadowColor: '#26372B', shadowOffset: { width: 0, height: 7 }, shadowOpacity: 0.07, shadowRadius: 16, elevation: 3 },
+  huntTargetVisual: { width: '37%', minHeight: 154, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF5EC', padding: 10 },
+  huntTargetArtwork: { fontSize: 56, lineHeight: 68, textAlign: 'center' },
+  huntDifficultyPill: { minHeight: 22, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, marginTop: 8, borderRadius: 12, backgroundColor: '#D5EBDD' },
+  huntDifficultyText: { color: '#28764A', fontSize: 8, fontWeight: '900', letterSpacing: 0.55 },
+  huntTargetDetails: { flex: 1, justifyContent: 'center', paddingVertical: 15, paddingHorizontal: 15 },
+  huntTargetEyebrow: { color: '#89928A', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
+  huntTargetName: { color: '#202922', fontSize: 19, lineHeight: 24, fontWeight: '900', letterSpacing: -0.3, marginTop: 3 },
+  huntTargetInstructions: { color: '#727A73', fontSize: 11, lineHeight: 16, marginTop: 5 },
+  huntChangeTarget: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 10, paddingVertical: 5, paddingRight: 7 },
+  huntChangeTargetIcon: { color: '#218B57', fontSize: 15, fontWeight: '800', marginRight: 5 },
+  huntChangeTargetText: { color: '#218B57', fontSize: 9, fontWeight: '900', letterSpacing: 0.65 },
+  huntScannerSection: { marginTop: 21 },
+  huntScannerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  huntScannerTitle: { color: '#313A33', fontSize: 10, fontWeight: '900', letterSpacing: 1.1 },
+  huntScannerStep: { color: '#8B938C', fontSize: 8, fontWeight: '800', letterSpacing: 0.6 },
+  huntViewfinder: { height: 220, overflow: 'hidden', position: 'relative', backgroundColor: '#DDE6DE', borderRadius: 20, borderWidth: 1, borderColor: '#E2E9E3' },
+  huntCameraPreview: { flex: 1 },
+  huntViewfinderOverlay: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
+  huntCorner: { position: 'absolute', width: 26, height: 26, borderColor: '#FFFFFF', borderWidth: 3 },
+  huntCornerTopLeft: { left: 15, top: 15, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 8 },
+  huntCornerTopRight: { right: 15, top: 15, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 8 },
+  huntCornerBottomLeft: { left: 15, bottom: 15, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 8 },
+  huntCornerBottomRight: { right: 15, bottom: 15, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 8 },
+  huntAimGuide: { width: '55%', height: 104, alignItems: 'center', justifyContent: 'flex-end', borderWidth: 1, borderColor: '#FFFFFF99', borderRadius: 18, paddingBottom: 8, backgroundColor: '#FFFFFF12' },
+  huntAimGuideText: { color: '#FFFFFF', fontSize: 8, fontWeight: '900', letterSpacing: 1.2, textShadowColor: '#00000099', textShadowRadius: 4 },
+  huntScanLine: { position: 'absolute', top: 8, left: 25, right: 25, height: 2, borderRadius: 2, backgroundColor: '#8CF0AE', shadowColor: '#8CF0AE', shadowOpacity: 0.9, shadowRadius: 8, elevation: 3 },
+  huntCameraStatus: { position: 'absolute', top: 13, alignSelf: 'center', minHeight: 24, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 9, borderRadius: 13, backgroundColor: '#17221BCC' },
+  huntCameraStatusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#F2C36B', marginRight: 6 },
+  huntCameraStatusDotReady: { backgroundColor: '#74D997' },
+  huntCameraStatusText: { color: '#FFFFFF', fontSize: 8, fontWeight: '900', letterSpacing: 0.65 },
+  huntScanButton: { minHeight: 54, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 16, backgroundColor: '#218B57', marginTop: 11, paddingHorizontal: 16, shadowColor: '#187345', shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.18, shadowRadius: 9, elevation: 3 },
+  huntScanButtonDisabled: { opacity: 0.6 },
+  huntScanButtonIcon: { color: '#FFFFFF', fontSize: 23, lineHeight: 25, fontWeight: '700', marginRight: 9 },
+  huntScanButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900', letterSpacing: 1 },
+  huntRetryNotice: { minHeight: 44, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 9, marginTop: 10, borderRadius: 13, backgroundColor: '#FFF5E8', borderWidth: 1, borderColor: '#F5E3CB' },
+  huntRetryIcon: { color: '#A96720', fontSize: 18, fontWeight: '800', marginRight: 8 },
+  huntRetryText: { flex: 1, color: '#85551F', fontSize: 10, lineHeight: 15, fontWeight: '700' },
+  huntPermissionMessage: { color: '#A35C2A', fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 8 },
+  huntCameraPlaceholder: { minHeight: 220, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20, paddingVertical: 18, borderRadius: 20, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E7ECE7' },
+  huntPlaceholderIcon: { width: 54, height: 54, alignItems: 'center', justifyContent: 'center', borderRadius: 18, backgroundColor: '#EAF5EC' },
+  huntPlaceholderGlyph: { color: '#218B57', fontSize: 36, lineHeight: 40 },
+  huntPlaceholderTitle: { color: '#29332C', fontSize: 15, fontWeight: '800', marginTop: 10 },
+  huntPlaceholderMessage: { color: '#768078', fontSize: 11, lineHeight: 16, textAlign: 'center', marginTop: 4, maxWidth: 270 },
+  huntSuccessCard: { minHeight: 220, alignItems: 'center', justifyContent: 'center', padding: 24, borderRadius: 20, backgroundColor: '#EAF6ED', borderWidth: 1, borderColor: '#CDE8D4' },
+  huntSuccessIcon: { width: 58, height: 58, alignItems: 'center', justifyContent: 'center', borderRadius: 29, backgroundColor: '#218B57' },
+  huntSuccessCheck: { color: '#FFFFFF', fontSize: 34, lineHeight: 40, fontWeight: '800' },
+  huntSuccessTitle: { color: '#1C7547', fontSize: 13, fontWeight: '900', letterSpacing: 1.1, marginTop: 13 },
+  huntSuccessMessage: { color: '#536B5A', fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: 5 },
+  huntKeepRinging: { flexDirection: 'row', alignItems: 'center', marginTop: 18, paddingHorizontal: 13, paddingVertical: 12, borderRadius: 15, backgroundColor: '#EDF2EE' },
+  huntKeepRingingIcon: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: '#DFEAE1', marginRight: 10 },
+  huntKeepRingingGlyph: { color: '#497357', fontSize: 15, fontWeight: '800' },
+  huntKeepRingingText: { flex: 1, color: '#657168', fontSize: 10, lineHeight: 15, fontWeight: '600' },
   alarmScreen: { flex: 1, backgroundColor: RED },
   alarmContent: { flexGrow: 1, backgroundColor: RED, paddingHorizontal: 22, paddingTop: 18, paddingBottom: 22 },
   alarmScreenTop: { flexDirection: 'row', alignItems: 'center' },
@@ -4131,54 +4481,15 @@ const styles = StyleSheet.create({
   challengeLabel: { color: '#A9A49D', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
   challengeBody: { alignItems: 'center', paddingTop: 15 },
   challengePrompt: { color: '#F5F2ED', fontSize: 17, lineHeight: 20, textAlign: 'center', fontWeight: '900', letterSpacing: 0.3 },
-  mathProblem: { color: '#FFFFFF', fontSize: 26, fontWeight: '900', marginVertical: 18, letterSpacing: 0.5 },
-  answerInput: { width: '100%', height: 48, backgroundColor: '#292724', borderWidth: 1, borderColor: '#514C46', borderRadius: 4, textAlign: 'center', color: '#FFFFFF', fontSize: 17, fontWeight: '800', letterSpacing: 2, marginBottom: 11 },
-  wrongAnswer: { color: '#FF8072', fontSize: 9, fontWeight: '900', letterSpacing: 1, marginBottom: 11 },
   shakeMeter: { width: '100%', height: 9, borderRadius: 5, backgroundColor: '#373431', overflow: 'hidden', marginTop: 25 },
   shakeFill: { height: 9, backgroundColor: RED, borderRadius: 5 },
   shakeCount: { color: '#FFFFFF', fontSize: 32, fontWeight: '900', marginVertical: 12 },
   shakeTotal: { color: '#918C85', fontSize: 15, fontWeight: '700' },
-  brushingTimer: { color: '#FFFFFF', fontSize: 58, fontWeight: '900', letterSpacing: -2, marginTop: 17 },
   shakeButton: { width: '100%', minHeight: 61, backgroundColor: RED, borderRadius: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   cameraButtonDisabled: { opacity: 0.55 },
   shakeButtonIcon: { color: '#FFFFFF', fontSize: 19, marginRight: 8 },
   shakeButtonText: { color: '#FFFFFF', fontSize: 9, fontWeight: '900', letterSpacing: 1.1 },
   simulationNote: { color: '#8D8881', fontSize: 8, marginTop: 12, marginBottom: 13, textAlign: 'center' },
-  alarmCamera: { width: '100%', height: 220, marginBottom: 16, borderRadius: 4, overflow: 'hidden' },
-  objectCaptureButton: { width: '100%', minHeight: 48, backgroundColor: RED, alignItems: 'center', justifyContent: 'center', borderRadius: 5, marginBottom: 12 },
-  objectCaptureButtonText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
-  huntRecognitionMessage: { color: '#FFC2B8', fontSize: 9, lineHeight: 14, fontWeight: '900', textAlign: 'center', letterSpacing: 0.5, marginTop: 6 },
-  cameraPermissionPrompt: { width: '100%', height: 145, alignItems: 'center', justifyContent: 'center', backgroundColor: '#292724', marginBottom: 14, borderRadius: 4 },
-  fakeScanner: { width: 146, height: 146, backgroundColor: '#262421', marginBottom: 18, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  scanGlyph: { color: '#FFFFFF', fontSize: 63, fontWeight: '300' },
-  objectRecognizedCard: { width: '100%', minHeight: 220, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E7F8EE', borderColor: '#43B76B', borderWidth: 2, borderRadius: 12, marginBottom: 14, padding: 20 },
-  objectRecognizedCheck: { width: 58, height: 58, overflow: 'hidden', borderRadius: 30, backgroundColor: '#168A4A', color: '#FFFFFF', textAlign: 'center', textAlignVertical: 'center', fontSize: 40, fontWeight: '900', marginBottom: 12 },
-  objectRecognizedTitle: { color: '#116B3A', fontSize: 13, fontWeight: '900', letterSpacing: 1.2, textAlign: 'center' },
-  objectRecognizedName: { color: '#174B2F', fontSize: 20, fontWeight: '900', marginTop: 8 },
-  challengeShuffleOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, backgroundColor: 'rgba(20, 12, 12, 0.96)' },
-  challengeShuffleEyebrow: { color: '#FFC8BD', fontSize: 10, fontWeight: '900', letterSpacing: 2 },
-  challengeShuffleTitle: { color: '#FFFFFF', fontSize: 25, fontWeight: '900', letterSpacing: 1, marginTop: 10, textAlign: 'center' },
-  challengeShuffleCard: { width: '100%', maxWidth: 300, minHeight: 220, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2A2221', borderColor: '#FF8072', borderWidth: 1, borderRadius: 18, marginVertical: 28 },
-  challengeShuffleEmoji: { fontSize: 68 },
-  challengeShuffleName: { color: '#FFFFFF', fontSize: 21, fontWeight: '900', letterSpacing: 1.2, marginTop: 12 },
-  challengeShuffleHint: { maxWidth: 280, color: '#F2DAD6', fontSize: 11, fontWeight: '800', letterSpacing: 1, lineHeight: 17, textAlign: 'center' },
-  scanLine: { position: 'absolute', left: 12, right: 12, height: 1, backgroundColor: RED },
-  scanCornerTopLeft: { position: 'absolute', left: 9, top: 9, width: 18, height: 18, borderLeftWidth: 3, borderTopWidth: 3, borderColor: RED },
-  scanCornerTopRight: { position: 'absolute', right: 9, top: 9, width: 18, height: 18, borderRightWidth: 3, borderTopWidth: 3, borderColor: RED },
-  scanCornerBottomLeft: { position: 'absolute', left: 9, bottom: 9, width: 18, height: 18, borderLeftWidth: 3, borderBottomWidth: 3, borderColor: RED },
-  scanCornerBottomRight: { position: 'absolute', right: 9, bottom: 9, width: 18, height: 18, borderRightWidth: 3, borderBottomWidth: 3, borderColor: RED },
-  memoryPattern: { flexDirection: 'row', gap: 9, marginTop: 19, marginBottom: 7 },
-  memoryKeypad: { flexDirection: 'row', gap: 9, marginTop: 9 },
-  memoryKey: { width: 58, height: 48, borderRadius: 4, backgroundColor: '#373431', alignItems: 'center', justifyContent: 'center' },
-  memoryKeyText: { color: '#FFFFFF', fontSize: 18, fontWeight: '900' },
-  memoryTile: { width: 52, height: 52, borderRadius: 5, backgroundColor: '#393633', alignItems: 'center', justifyContent: 'center' },
-  memoryTileActive: { backgroundColor: RED },
-  memoryDigit: { color: '#D1CCC5', fontSize: 17, fontWeight: '900' },
-  memoryDigitActive: { color: '#FFFFFF' },
-  snoozeButton: { marginTop: 12, borderWidth: 1, borderColor: '#FFCAC2', borderRadius: 4, minHeight: 42, justifyContent: 'center', alignItems: 'center' },
-  snoozeText: { color: '#FFFFFF', fontSize: 8, fontWeight: '900', letterSpacing: 1 },
-  emergencyBypass: { alignSelf: 'center', minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 },
-  emergencyBypassText: { color: '#FFDAD4', fontSize: 10, fontWeight: '800', letterSpacing: 1.1, textDecorationLine: 'underline' },
   alarmScreenFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 'auto', paddingTop: 17 },
   alarmFootMark: { marginRight: 7 },
   alarmFootText: { color: '#FFDAD4', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 },

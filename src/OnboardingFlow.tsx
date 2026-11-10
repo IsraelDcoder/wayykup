@@ -15,38 +15,37 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+                                                                                                                                                                    import { useCameraPermissions } from 'expo-camera';
 import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import Svg, { Circle, ClipPath, Defs, Ellipse, G, Path } from 'react-native-svg';
+import { ALARM_SOUNDS, alarmSoundAsset } from './alarmSounds';
+import {
+  DEFAULT_ALARM_SOUND_ID,
+  isAlarmSoundId,
+  migrateAlarmSoundId,
+  type AlarmSoundId,
+} from './alarmSoundIds';
 import {
   getAlarmHealth,
   persistKeepAlarmPlayingPreference,
   requestAlarmNotifications,
   type AlarmRecord,
 } from './nativeServices';
-import { HUNT_ITEMS } from './challenges/objects';
+import { chooseHuntTargetForDifficulty, huntTargetsForDifficulty, HUNT_ITEMS } from './challenges/objects';
 import { WayykupIcon } from './components/WayykupIcon';
+import {
+  CHALLENGE_OPTIONS,
+  type ChallengeConfiguration,
+  type ObjectHuntDifficulty,
+} from './challenges/registry';
 
 const RED = '#F29A00';
 const INK = '#1A131A';
 const MUTED = '#89868D';
 const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
 const DAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
-const SOUNDS = [
-  { name: 'Beacon', category: 'Classic', source: require('../assets/beacon.wav') },
-  { name: 'Buzz Saw', category: 'Classic', source: require('../assets/buzz-saw.wav') },
-  { name: 'Kitchen Phone', category: 'Classic', source: require('../assets/kitchen-phone.wav') },
-  { name: 'Pulse', category: 'Classic', source: require('../assets/pulse.wav') },
-  { name: 'Air Raid', category: 'Loud', source: require('../assets/alarm-tone.wav') },
-  { name: 'Honk', category: 'Loud', source: require('../assets/honk.wav') },
-  { name: 'Inferno', category: 'Loud', source: require('../assets/inferno.wav') },
-  { name: 'Redline', category: 'Loud', source: require('../assets/redline.wav') },
-  { name: 'Bugle Call', category: 'Extreme', source: require('../assets/bugle-call.wav') },
-  { name: 'Countdown', category: 'Extreme', source: require('../assets/countdown.wav') },
-  { name: 'Jackhammer', category: 'Extreme', source: require('../assets/jackhammer.wav') },
-  { name: 'Warpath', category: 'Extreme', source: require('../assets/warpath.wav') },
-] as const;
+const SOUND_CATEGORIES = [...new Set(ALARM_SOUNDS.map((sound) => sound.category))];
 const TESTIMONIALS = [
   { quote: 'This app changed my morning.', author: 'Wayykup user' },
   { quote: 'I got up so fast.', author: 'Arga meja' },
@@ -73,7 +72,6 @@ const STEPS = [
   'notifications',
   'challenge',
   'homeItems',
-  'qrLink',
   'cameraAccess',
   'objectPick',
   'alarmPlayback',
@@ -83,7 +81,7 @@ const STEPS = [
 ] as const;
 
 type Step = typeof STEPS[number];
-type WakeTask = AlarmRecord['task'];
+type WakeTask = (typeof CHALLENGE_OPTIONS)[number]['task'];
 type Answers = {
   source: string;
   rating: string;
@@ -110,12 +108,18 @@ const ANSWER_KEYS: (keyof Answers)[] = [
   'help',
 ];
 
-const CHALLENGES: { task: WakeTask; title: string; art: 'object' | 'toothbrush' | 'pushups' | 'squats'; color: string }[] = [
-  { task: 'Object Hunt', title: 'Object Hunt', art: 'object', color: '#FFE7BB' },
-  { task: 'Toothbrush', title: 'Toothbrush', art: 'toothbrush', color: '#D8ECF3' },
-  { task: 'Push-ups', title: 'Push-ups', art: 'pushups', color: '#FFD4B7' },
-  { task: 'Squats', title: 'Squats', art: 'squats', color: '#E1E3C8' },
-];
+const CHALLENGE_ART = {
+  yell_to_stop: { art: 'yell', color: '#DDF3E5' },
+  push_up: { art: 'pushups', color: '#E6F1E7' },
+  shake_phone: { art: 'shake', color: '#E2F4EC' },
+  object_hunt: { art: 'object', color: '#E7F5E9' },
+} as const;
+const CHALLENGES = CHALLENGE_OPTIONS.map((challenge) => ({
+  ...challenge,
+  ...CHALLENGE_ART[challenge.type],
+  difficulty: challenge.difficulty.toUpperCase(),
+  duration: challenge.duration.toUpperCase(),
+}));
 const ONBOARDING_DRAFT_KEY = 'wayykup:onboarding-draft:v1';
 
 function formatOnboardingTime(hour: number, minute: number, period: 'AM' | 'PM') {
@@ -123,7 +127,7 @@ function formatOnboardingTime(hour: number, minute: number, period: 'AM' | 'PM')
 }
 
 type OnboardingDraft = {
-  step: Step | 'scanIntro' | 'scan';
+  step: Step | 'scanIntro' | 'scan' | 'qrLink';
   answers: Answers;
   hour: number;
   minute: number;
@@ -131,10 +135,13 @@ type OnboardingDraft = {
   repeatDays: string[];
   huntItems: string[];
   huntTarget: string;
-  sound: string;
+  objectDifficulty?: ObjectHuntDifficulty;
+  shakeTarget?: 10 | 25 | 50 | 100 | 200;
+  pushUpTarget?: 5 | 10 | 15 | 20;
+  challengePhrase?: "I'M AWAKE!" | 'GOOD MORNING!' | "I'M UP!" | 'WAKE UP!';
+  sound: AlarmSoundId;
   task: WakeTask | null;
   notificationGranted: boolean;
-  qrCode: string;
   keepAlarmPlaying: boolean | null;
 };
 
@@ -142,7 +149,7 @@ function isOnboardingDraft(value: unknown): value is OnboardingDraft {
   if (typeof value !== 'object' || value === null) return false;
   const draft = value as Record<string, unknown>;
   const answers = draft.answers;
-  return (STEPS.includes(draft.step as Step) || draft.step === 'scanIntro' || draft.step === 'scan')
+  return (STEPS.includes(draft.step as Step) || draft.step === 'scanIntro' || draft.step === 'scan' || draft.step === 'qrLink')
     && typeof answers === 'object'
     && answers !== null
     && ANSWER_KEYS.every((key) => typeof (answers as Record<string, unknown>)[key] === 'string')
@@ -161,11 +168,32 @@ function isOnboardingDraft(value: unknown): value is OnboardingDraft {
     && draft.huntItems.length <= HUNT_ITEMS.length
     && draft.huntItems.every((item) => HUNT_ITEMS.some((knownItem) => knownItem.name === item))
     && typeof draft.huntTarget === 'string'
-    && SOUNDS.some((item) => item.name === draft.sound)
-    && (draft.task === null || ['Math', 'Shake', 'QR scan', 'Memory', 'Object Hunt', 'Toothbrush', 'Push-ups', 'Squats'].includes(String(draft.task)))
+    && typeof draft.sound === 'string'
+    && (draft.task === null || typeof draft.task === 'string')
+    && (draft.objectDifficulty === undefined || ['easy', 'medium', 'hard'].includes(String(draft.objectDifficulty)))
+    && (draft.shakeTarget === undefined || [10, 25, 50, 100, 200].includes(Number(draft.shakeTarget)))
+    && (draft.pushUpTarget === undefined || [5, 10, 15, 20].includes(Number(draft.pushUpTarget)))
+    && (draft.challengePhrase === undefined || ["I'M AWAKE!", 'GOOD MORNING!', "I'M UP!", 'WAKE UP!'].includes(String(draft.challengePhrase)))
     && typeof draft.notificationGranted === 'boolean'
-    && typeof draft.qrCode === 'string'
     && (draft.keepAlarmPlaying === null || typeof draft.keepAlarmPlaying === 'boolean');
+}
+
+function currentOnboardingTask(task: unknown): WakeTask | null {
+  switch (task) {
+    case 'Yell to Stop':
+    case 'Yell to Wake':
+      return 'Yell to Stop';
+    case 'Push-up Challenge':
+    case 'Push-ups':
+      return 'Push-up Challenge';
+    case 'Shake Your Phone':
+    case 'Shake':
+      return 'Shake Your Phone';
+    case 'Object Hunt':
+      return 'Object Hunt';
+    default:
+      return null;
+  }
 }
 
 function ChallengeIllustration({ type }: { type: (typeof CHALLENGES)[number]['art'] }) {
@@ -188,7 +216,7 @@ function ChallengeIllustration({ type }: { type: (typeof CHALLENGES)[number]['ar
           <Path d="M116 101H136M126 91V111" stroke="#F2B51C" strokeWidth={3} strokeLinecap="round" />
         </>
       )}
-      {type === 'toothbrush' && (
+      {type === 'yell' && (
         <>
           <Path d="M0 0H240V230H0Z" fill="#D8ECF3" />
           <Path d="M25 0V230M145 0V230M0 68H240M0 161H240" stroke="#A9CEDB" strokeWidth={2} />
@@ -220,7 +248,7 @@ function ChallengeIllustration({ type }: { type: (typeof CHALLENGES)[number]['ar
           <Path d="M171 153L191 157L204 170L197 176L182 168Z" fill="#262B29" />
         </>
       )}
-      {type === 'squats' && (
+      {type === 'shake' && (
         <>
           <Path d="M0 0H240V230H0Z" fill="#E1E3C8" />
           <Path d="M0 179H240V230H0Z" fill="#C9CCAD" />
@@ -768,7 +796,7 @@ export function OnboardingFlow({
   trackEvent,
   reduceMotion,
 }: {
-  onComplete: (setup: OnboardingSetup) => void;
+  onComplete: (setup: OnboardingSetup) => Promise<void>;
   trackEvent: (name: string, properties?: Record<string, string | number | boolean>) => void;
   reduceMotion: boolean;
 }) {
@@ -777,7 +805,7 @@ export function OnboardingFlow({
   const availableHeight = Math.max(0, windowHeight - insets.top - insets.bottom);
   const compactLayout = availableHeight < 700 || windowWidth < 360 || fontScale > 1.15;
   const shortLayout = availableHeight < 620;
-  const challengeCardHeight = Math.max(132, Math.min(224, (availableHeight - 300) / 2));
+  const challengeCardHeight = Math.max(175, Math.min(190, (availableHeight - 300) / 2));
   const [step, setStep] = useState<Step>('welcome');
   const [savingsRevealed, setSavingsRevealed] = useState(false);
   const [answers, setAnswers] = useState<Answers>({
@@ -798,15 +826,16 @@ export function OnboardingFlow({
   const [repeatDays, setRepeatDays] = useState<string[]>(['0', '1', '2', '3', '4']);
   const [huntItems, setHuntItems] = useState<string[]>([]);
   const [huntTarget, setHuntTarget] = useState('');
-  const [sound, setSound] = useState<(typeof SOUNDS)[number]['name']>('Beacon');
+  const [objectDifficulty, setObjectDifficulty] = useState<ObjectHuntDifficulty>('easy');
+  const [shakeTarget, setShakeTarget] = useState<10 | 25 | 50 | 100 | 200>(25);
+  const [pushUpTarget, setPushUpTarget] = useState<5 | 10 | 15 | 20>(10);
+  const [challengePhrase, setChallengePhrase] = useState<"I'M AWAKE!" | 'GOOD MORNING!' | "I'M UP!" | 'WAKE UP!'>("I'M AWAKE!");
+  const [sound, setSound] = useState<AlarmSoundId>(DEFAULT_ALARM_SOUND_ID);
   const [task, setTask] = useState<WakeTask | null>(null);
   const [notificationGranted, setNotificationGranted] = useState(false);
   const [notificationDenied, setNotificationDenied] = useState(false);
   const [notificationPermissionMessage, setNotificationPermissionMessage] = useState('');
   const [cameraDenied, setCameraDenied] = useState(false);
-  const [linkingQr, setLinkingQr] = useState(false);
-  const [qrCode, setQrCode] = useState('');
-  const [qrError, setQrError] = useState('');
   const [commitComplete, setCommitComplete] = useState(false);
   const [fingerprintHolding, setFingerprintHolding] = useState(false);
   const [rollItemName, setRollItemName] = useState('');
@@ -818,7 +847,7 @@ export function OnboardingFlow({
   const [draftLoaded, setDraftLoaded] = useState(false);
   const [draftStorageError, setDraftStorageError] = useState('');
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [soundPlayer] = [useAudioPlayer(SOUNDS[0].source)];
+  const soundPlayer = useAudioPlayer(alarmSoundAsset(DEFAULT_ALARM_SOUND_ID));
   const commitProgress = useRef(new Animated.Value(0)).current;
   const fingerprintProgress = useRef(new Animated.Value(0)).current;
   const fingerprintHapticsTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -843,8 +872,6 @@ export function OnboardingFlow({
   const completedRef = useRef(false);
   const stepIndex = STEPS.indexOf(step);
   const wakeTimeLabel = answers.wakeTime || 'your chosen time';
-  const isPremiumTask = task === 'Shake' || task === 'QR scan';
-  const selectedSound = SOUNDS.find((item) => item.name === sound) ?? SOUNDS[0];
   const time = useMemo(() => {
     let hours24 = hour % 12;
     if (period === 'PM') hours24 += 12;
@@ -967,7 +994,11 @@ export function OnboardingFlow({
         if (!active || !savedDraft) return;
         const parsed: unknown = JSON.parse(savedDraft);
         if (!isOnboardingDraft(parsed)) throw new Error('Saved onboarding progress is invalid.');
-        setStep(parsed.step === 'scan' || parsed.step === 'scanIntro' ? 'objectPick' : parsed.step);
+        const restoredTask = currentOnboardingTask(parsed.task);
+        const restoredStep = parsed.step === 'scan' || parsed.step === 'scanIntro'
+          ? restoredTask === 'Object Hunt' ? 'objectPick' : 'challenge'
+          : parsed.step === 'qrLink' ? 'challenge' : parsed.step;
+        setStep(restoredStep);
         setAnswers(parsed.answers);
         setHour(parsed.hour);
         setMinute(parsed.minute);
@@ -975,10 +1006,13 @@ export function OnboardingFlow({
         setRepeatDays(parsed.repeatDays);
         setHuntItems(parsed.huntItems);
         setHuntTarget(parsed.huntTarget);
-        setSound(parsed.sound as (typeof SOUNDS)[number]['name']);
-        setTask(parsed.task);
+        setObjectDifficulty(parsed.objectDifficulty ?? 'easy');
+        setShakeTarget(parsed.shakeTarget ?? 25);
+        setPushUpTarget(parsed.pushUpTarget ?? 10);
+        setChallengePhrase(parsed.challengePhrase ?? "I'M AWAKE!");
+        setSound(isAlarmSoundId(parsed.sound) ? parsed.sound : migrateAlarmSoundId(parsed.sound));
+        setTask(restoredTask);
         setNotificationGranted(parsed.notificationGranted);
-        setQrCode(parsed.qrCode);
         setKeepAlarmPlaying(parsed.keepAlarmPlaying);
       })
       .catch((error: unknown) => {
@@ -1003,10 +1037,13 @@ export function OnboardingFlow({
       repeatDays,
       huntItems,
       huntTarget,
+      objectDifficulty,
+      shakeTarget,
+      pushUpTarget,
+      challengePhrase,
       sound,
       task,
       notificationGranted,
-      qrCode,
       keepAlarmPlaying,
     };
     AsyncStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(draft)).catch((error: unknown) => {
@@ -1017,15 +1054,18 @@ export function OnboardingFlow({
     answers,
     draftLoaded,
     hour,
+    objectDifficulty,
     huntItems,
     huntTarget,
     keepAlarmPlaying,
     minute,
     notificationGranted,
     period,
-    qrCode,
     repeatDays,
     sound,
+    shakeTarget,
+    pushUpTarget,
+    challengePhrase,
     step,
     task,
   ]);
@@ -1087,8 +1127,7 @@ export function OnboardingFlow({
   const goBack = () => {
     const previousStep: Partial<Record<Step, Step>> = {
       homeItems: 'challenge',
-      qrLink: 'challenge',
-      cameraAccess: 'homeItems',
+      cameraAccess: task === 'Object Hunt' ? 'homeItems' : 'challenge',
       objectPick: 'cameraAccess',
       alarmPlayback: task === 'Object Hunt' ? 'objectPick' : 'challenge',
       commitIntro: 'alarmPlayback',
@@ -1158,26 +1197,11 @@ export function OnboardingFlow({
     }
   };
 
-  const startQrLinking = async () => {
-    setQrError('');
-    if (cameraPermission?.granted) {
-      setLinkingQr(true);
-      return;
-    }
-    try {
-      const permission = await requestCameraPermission();
-      if (permission.granted) setLinkingQr(true);
-      else setQrError('Camera access is needed to link a QR code. You can choose another challenge instead.');
-    } catch (error) {
-      console.error('Camera permission request failed during onboarding.', error);
-      setQrError('Camera access could not be requested on this device.');
-    }
-  };
-
   const enableChallengeCamera = async () => {
+    const nextStep = task === 'Object Hunt' ? 'objectPick' : 'alarmPlayback';
     if (cameraPermission?.granted) {
       setCameraDenied(false);
-      goTo('objectPick');
+      goTo(nextStep);
       return;
     }
     if (cameraPermission && !cameraPermission.canAskAgain) {
@@ -1193,7 +1217,7 @@ export function OnboardingFlow({
       const permission = await requestCameraPermission();
       if (permission.granted) {
         setCameraDenied(false);
-        goTo('objectPick');
+        goTo(nextStep);
       } else {
         setCameraDenied(true);
       }
@@ -1223,11 +1247,10 @@ export function OnboardingFlow({
     },
   }), [commitComplete, signatureArea.height, signatureArea.width, step]);
 
-  const previewSound = async (name: (typeof SOUNDS)[number]['name'] = sound) => {
+  const previewSound = async (soundId: AlarmSoundId = sound) => {
     try {
       await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: false });
-      const source = SOUNDS.find((item) => item.name === name)?.source ?? SOUNDS[0].source;
-      soundPlayer.replace(source);
+      soundPlayer.replace(alarmSoundAsset(soundId));
       soundPlayer.volume = 0.8;
       soundPlayer.play();
     } catch (error) {
@@ -1235,12 +1258,30 @@ export function OnboardingFlow({
     }
   };
 
-  const finishCommitment = () => {
-    if (completedRef.current || !task) return false;
+  const finishCommitment = async () => {
+    if (
+      completedRef.current
+      || !task
+      || !CHALLENGES.some((challenge) => challenge.task === task)
+    ) return false;
     if (keepAlarmPlaying === null) return false;
     completedRef.current = true;
     Vibration.vibrate(50);
     trackEvent('onboarding_commitment_completed', { task, time });
+    let challengeConfig: ChallengeConfiguration | undefined;
+    if (task === 'Yell to Stop') {
+      challengeConfig = { type: 'yell_to_stop', phrase: challengePhrase, requiredCompletions: 1 };
+    } else if (task === 'Push-up Challenge') {
+      challengeConfig = { type: 'push_up', targetCount: pushUpTarget };
+    } else if (task === 'Shake Your Phone') {
+      challengeConfig = { type: 'shake_phone', targetCount: shakeTarget };
+    } else if (task === 'Object Hunt') {
+      challengeConfig = { type: 'object_hunt', difficulty: objectDifficulty, targetObject: huntTarget };
+    }
+    if (!challengeConfig) {
+      completedRef.current = false;
+      return false;
+    }
     const alarm: AlarmRecord = {
       id: `onboarding-${Date.now()}`,
       time,
@@ -1249,17 +1290,19 @@ export function OnboardingFlow({
       sound,
       enabled: true,
       savage: false,
-      qrCode: task === 'QR scan' ? qrCode : undefined,
-      huntItems: task === 'Object Hunt' ? huntItems : undefined,
-      huntTarget: task === 'Object Hunt' ? huntTarget : undefined,
-      mathDifficulty: 'Medium',
-      shakeCount: 100,
+      challengeConfig,
     };
-    AsyncStorage.removeItem(ONBOARDING_DRAFT_KEY).catch((error: unknown) => {
-      console.error('Completed onboarding progress could not be cleared.', error);
-    });
-    onComplete({ alarm, notificationGranted, keepAlarmPlaying });
-    return true;
+    try {
+      await onComplete({ alarm, notificationGranted, keepAlarmPlaying });
+      void AsyncStorage.removeItem(ONBOARDING_DRAFT_KEY).catch((error: unknown) => {
+        console.error('Completed onboarding draft could not be cleared.', error);
+      });
+      return true;
+    } catch (error) {
+      console.error('Onboarding setup could not be persisted.', error);
+      completedRef.current = false;
+      return false;
+    }
   };
 
   const confirmSignature = () => {
@@ -1300,16 +1343,17 @@ export function OnboardingFlow({
       useNativeDriver: false,
     }).start(({ finished }) => {
       if (!finished || fingerprintCompleted.current) return;
-      fingerprintCompleted.current = true;
       stopFingerprintHaptics();
       setFingerprintHolding(false);
-      if (finishCommitment()) {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
-          .catch((error: unknown) => console.warn('Fingerprint confirmation haptic failed:', error));
-      } else {
-        fingerprintCompleted.current = false;
-        fingerprintProgress.setValue(0);
-      }
+      void finishCommitment().then((completed) => {
+        if (completed) {
+          fingerprintCompleted.current = true;
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+            .catch((error: unknown) => console.warn('Fingerprint confirmation haptic failed:', error));
+        } else {
+          fingerprintProgress.setValue(0);
+        }
+      });
     });
   };
 
@@ -1342,7 +1386,8 @@ export function OnboardingFlow({
       case 'alarmCount': return !!answers.alarmCount;
       case 'help': return !!answers.help;
       case 'repeat': return repeatDays.length > 0;
-      case 'challenge': return task !== null;
+      case 'challenge': return task !== null
+        && CHALLENGES.some((challenge) => challenge.task === task);
       case 'homeItems': return huntItems.length > 0;
       case 'objectPick': return rollComplete;
       case 'alarmPlayback': return keepAlarmPlaying !== null;
@@ -1358,17 +1403,13 @@ export function OnboardingFlow({
       return;
     }
     if (step === 'challenge') {
-      if (task === 'QR scan' && !qrCode) goTo('qrLink');
-      else if (task === 'Object Hunt') goTo('homeItems');
+      if (task === 'Object Hunt') goTo('homeItems');
+      else if (task === 'Push-up Challenge') goTo('cameraAccess');
       else goTo('alarmPlayback');
       return;
     }
     if (step === 'homeItems') {
       goTo('cameraAccess');
-      return;
-    }
-    if (step === 'qrLink') {
-      if (qrCode) goTo('alarmPlayback');
       return;
     }
     if (step === 'cameraAccess') {
@@ -1440,7 +1481,6 @@ export function OnboardingFlow({
       case 'notifications': return 'Almost ready!';
       case 'challenge': return 'Pick your\nchallenge';
       case 'homeItems': return 'Pick the items you\nhave at home';
-      case 'qrLink': return linkingQr ? 'Link your QR code' : 'Set up your QR challenge';
       case 'cameraAccess': return 'Enable camera access';
       case 'objectPick': return 'Your first wake-up challenge.';
       case 'alarmPlayback': return 'Keep your alarm playing during challenges?';
@@ -1668,22 +1708,22 @@ export function OnboardingFlow({
         return (
           <View>
             <Text style={styles.soundIntro}>Pick the sound that gets you up.</Text>
-            {(['Classic', 'Loud', 'Extreme'] as const).map((category) => {
-              const categorySounds = SOUNDS.filter((item) => item.category === category);
-              const categoryIcon = category === 'Classic' ? '🔔' : category === 'Loud' ? '📢' : '⚡';
+            {SOUND_CATEGORIES.map((category) => {
+              const categorySounds = ALARM_SOUNDS.filter((item) => item.category === category);
+              const categoryIcon = category === 'Emergency' ? '�' : category === 'Industrial' ? '⚙️' : category === 'Intense' ? '📢' : '⚡';
               return (
                 <View key={category} style={styles.soundSection}>
                   <Text style={styles.soundSectionTitle}>{categoryIcon} {category}</Text>
                   <View style={styles.soundCard}>
                     {categorySounds.map((item, index) => {
-                      const selected = sound === item.name;
+                      const selected = sound === item.id;
                       return (
-                        <CinematicItem key={item.name} index={index}>
+                        <CinematicItem key={item.id} index={index}>
                           <View style={[styles.soundRow, index === categorySounds.length - 1 && styles.soundRowLast]}>
                             <TouchableOpacity
                               accessibilityRole="button"
                               accessibilityLabel={`Preview ${item.name}`}
-                              onPress={() => { setSound(item.name); void previewSound(item.name); }}
+                              onPress={() => { setSound(item.id); void previewSound(item.id); }}
                               style={styles.playButton}
                             >
                               <Text style={styles.playIcon}>▶</Text>
@@ -1691,7 +1731,7 @@ export function OnboardingFlow({
                             <TouchableOpacity
                               accessibilityRole="radio"
                               accessibilityState={{ selected }}
-                              onPress={() => setSound(item.name)}
+                              onPress={() => setSound(item.id)}
                               style={styles.soundCopy}
                             >
                               <Text style={styles.soundName}>{item.name}</Text>
@@ -1700,7 +1740,7 @@ export function OnboardingFlow({
                               accessibilityRole="radio"
                               accessibilityLabel={`Select ${item.name}`}
                               accessibilityState={{ selected }}
-                              onPress={() => setSound(item.name)}
+                              onPress={() => setSound(item.id)}
                               style={[styles.selectSound, selected && styles.selectSoundOn]}
                             >
                               <Text style={[styles.check, selected && styles.checkOn]}>{selected ? '✓' : ''}</Text>
@@ -1753,41 +1793,92 @@ export function OnboardingFlow({
                     <View style={styles.challengeArtwork}>
                       <ChallengeIllustration type={challenge.art} />
                     </View>
-                    <Text style={styles.challengeTitle}>{challenge.title}</Text>
+                    <View style={styles.challengeCopy}>
+                      <Text style={styles.challengeTitle}>{challenge.title}</Text>
+                      <Text style={styles.challengeDescription}>{challenge.description}</Text>
+                      <View style={styles.challengeMetaRow}>
+                        <Text style={styles.challengeMeta}>{challenge.difficulty}</Text>
+                        <Text style={styles.challengeMeta}>{challenge.duration}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.challengeMissionIcon}><Text style={styles.challengeMissionIconText}>{challenge.icon}</Text></View>
                     {selected && <Text style={styles.challengeCheck}>✓</Text>}
                   </TouchableOpacity>
                 </CinematicItem>
               );
             })}
-            {isPremiumTask && <Text style={styles.premiumNote}>Shake and QR challenges require Wayykup Plus. If you continue without a subscription, your alarm will use Math instead.</Text>}
-            {!!qrError && <Text style={styles.qrError}>{qrError}</Text>}
+            {task === 'Yell to Stop' && (
+              <View style={styles.challengeConfigPanel}>
+                <Text style={styles.challengeConfigHeading}>SAY THIS TO STOP YOUR ALARM</Text>
+                <View style={styles.challengeConfigChoices}>
+                  {(["I'M AWAKE!", 'GOOD MORNING!', "I'M UP!", 'WAKE UP!'] as const).map((phrase) => (
+                    <TouchableOpacity
+                      key={phrase}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: challengePhrase === phrase }}
+                      onPress={() => setChallengePhrase(phrase)}
+                      style={[styles.challengeConfigChoice, challengePhrase === phrase && styles.challengeConfigChoiceSelected]}
+                    >
+                      <Text style={[styles.challengeConfigChoiceText, challengePhrase === phrase && styles.challengeConfigChoiceTextSelected]}>{phrase}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+            {task === 'Push-up Challenge' && (
+              <View style={styles.challengeConfigPanel}>
+                <Text style={styles.challengeConfigHeading}>PUSH-UP TARGET</Text>
+                <View style={styles.challengeConfigChoices}>
+                  {([5, 10, 15, 20] as const).map((count) => (
+                    <TouchableOpacity key={count} onPress={() => setPushUpTarget(count)} style={[styles.challengeConfigChoice, pushUpTarget === count && styles.challengeConfigChoiceSelected]}>
+                      <Text style={[styles.challengeConfigChoiceText, pushUpTarget === count && styles.challengeConfigChoiceTextSelected]}>{count}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+            {task === 'Shake Your Phone' && (
+              <View style={styles.challengeConfigPanel}>
+                <Text style={styles.challengeConfigHeading}>SHAKE TARGET</Text>
+                <View style={styles.challengeConfigChoices}>
+                  {([10, 25, 50, 100, 200] as const).map((count) => (
+                    <TouchableOpacity key={count} onPress={() => setShakeTarget(count)} style={[styles.challengeConfigChoice, shakeTarget === count && styles.challengeConfigChoiceSelected]}>
+                      <Text style={[styles.challengeConfigChoiceText, shakeTarget === count && styles.challengeConfigChoiceTextSelected]}>{count}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
           </View>
         );
       case 'homeItems':
         return (
           <View>
-            <Text style={styles.homeItemsDescription}>Choose the objects you can reach. Wayykup will shuffle them when your alarm rings.</Text>
+            <Text style={styles.homeItemsDescription}>Choose how challenging your search should be. Wayykup will ask for one supported object when your alarm rings.</Text>
             <View style={styles.homeItemsGrid}>
-              {HUNT_ITEMS.map((item, index) => {
-                const selected = huntItems.includes(item.name);
+              {([
+                { value: 'easy', title: 'EASY', description: 'Common nearby objects', icon: '☀' },
+                { value: 'medium', title: 'MEDIUM', description: 'Everyday household objects', icon: '◈' },
+                { value: 'hard', title: 'HARD', description: 'A wider supported object range', icon: '✦' },
+              ] as const).map((level, index) => {
+                const selected = objectDifficulty === level.value;
                 return (
-                  <CinematicItem key={item.name} index={index} style={styles.homeItemMotion}>
+                  <CinematicItem key={level.value} index={index} style={styles.homeItemMotion}>
                     <TouchableOpacity
                       accessibilityRole="radio"
                       accessibilityState={{ selected }}
                       onPress={() => {
-                        const nextItems = selected
-                          ? huntItems.filter((name) => name !== item.name)
-                          : [...huntItems, item.name];
-                        setHuntItems(nextItems);
-                        setHuntTarget(selected
-                          ? nextItems[0] ?? ''
-                          : item.name);
+                        setObjectDifficulty(level.value);
+                        const targets = huntTargetsForDifficulty(level.value);
+                        const selectedTarget = chooseHuntTargetForDifficulty(level.value);
+                        setHuntItems(targets);
+                        setHuntTarget(selectedTarget ?? '');
                       }}
                       style={[styles.homeItemCard, selected && styles.homeItemCardSelected]}
                     >
-                      <Text style={styles.homeItemImage}>{item.image}</Text>
-                      <Text numberOfLines={1} style={styles.homeItemName}>{item.name}</Text>
+                      <Text style={styles.homeItemImage}>{level.icon}</Text>
+                      <Text numberOfLines={1} style={styles.homeItemName}>{level.title}</Text>
+                      <Text style={styles.homeItemsDescription}>{level.description}</Text>
                       <View style={[styles.homeItemCheck, selected && styles.homeItemCheckSelected]}>
                         {selected && <Text style={styles.homeItemCheckmark}>✓</Text>}
                       </View>
@@ -1833,7 +1924,9 @@ export function OnboardingFlow({
               <Path d="m267 121 3 7 7 3-7 3-3 7-3-7-7-3 7-3z" fill="#F29A00" />
             </Svg>
             <Text style={styles.cameraAccessDescription}>
-              Allow camera access so Wayykup can recognize your shuffled target object when the alarm rings. No tags or setup scans are needed.
+              {task === 'Push-up Challenge'
+                ? 'Allow camera access so Wayykup can verify your push-up form and count completed repetitions.'
+                : 'Allow camera access so Wayykup can recognize your selected target object when the alarm rings.'}
             </Text>
             {cameraDenied && (
               <Text style={styles.permissionError}>
@@ -1995,34 +2088,11 @@ export function OnboardingFlow({
             </TouchableOpacity>
           </View>
         );
-      case 'qrLink':
-        return (
-          <View style={styles.qrWrap}>
-            {!linkingQr || !cameraPermission?.granted ? (
-              <View style={styles.infoCard}><Text style={styles.infoIcon}>▦</Text><Text style={styles.infoText}>Place a QR code somewhere you must get out of bed to reach. Wayykup stores its scanned contents with this alarm so it can check the code when you scan it later.</Text></View>
-            ) : (
-              <CameraView
-                style={styles.camera}
-                barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-                onBarcodeScanned={({ data }) => {
-                  if (!data || qrCode) return;
-                  setQrCode(data);
-                  setLinkingQr(false);
-                  setQrError('');
-                }}
-              />
-            )}
-            {qrCode ? <Text style={styles.linkedText}>QR CODE LINKED ✓</Text> : <TouchableOpacity onPress={() => { void startQrLinking(); }} style={styles.scanButton}><Text style={styles.scanButtonText}>{linkingQr ? 'SCANNING…' : 'ALLOW CAMERA & SCAN CODE'}</Text></TouchableOpacity>}
-            {!!qrError && <Text style={styles.qrError}>{qrError}</Text>}
-            <TouchableOpacity onPress={() => { setTask('Math'); goTo('alarmPlayback'); }} style={styles.alternateTask}><Text style={styles.alternateTaskText}>Use Math instead</Text></TouchableOpacity>
-          </View>
-        );
     }
   };
 
   const optionStep = ['source', 'rating', 'age', 'gender', 'wakeTime', 'reason', 'bedTime', 'alarmReaction', 'alarmCount', 'help', 'repeat', 'challenge'].includes(step);
   const buttonEnabled = isReady()
-    && (step !== 'qrLink' || !!qrCode)
     && (step !== 'commit' || signatureHasInk || commitComplete);
   const progressWidth = progressMotion.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
@@ -2146,14 +2216,12 @@ export function OnboardingFlow({
                       : step === 'sound' ? 'Continue'
                         : step === 'challenge' ? 'Continue'
                           : step === 'homeItems' ? 'Continue'
-                            : step === 'cameraAccess' ? (cameraPermission && !cameraPermission.granted && !cameraPermission.canAskAgain ? 'Open Camera Settings' : 'Okay')
+                            : step === 'cameraAccess' ? (cameraPermission && !cameraPermission.granted && !cameraPermission.canAskAgain ? 'Open Camera Settings' : 'Enable Camera')
                               : step === 'objectPick' ? 'Continue'
-                                  : step === 'qrLink' ? (qrCode ? 'Continue' : 'Scan a code or choose Math')
-                                    : step === 'commit' ? (commitComplete ? 'Continue to fingerprint' : 'Confirm signature')
-                                      : 'Continue'}
+                                  : step === 'commit' ? (commitComplete ? 'Continue to fingerprint' : 'Confirm signature')
+                                    : 'Continue'}
             </Text>
           </AnimatedTouchableOpacity>
-          {step === 'qrLink' && task === 'QR scan' && <TouchableOpacity onPress={() => { setTask('Math'); goTo('alarmPlayback'); }} style={styles.laterButton}><Text style={styles.laterText}>Choose Math instead</Text></TouchableOpacity>}
         </Animated.View>
       )}
       </Animated.View>
@@ -2369,11 +2437,25 @@ const styles = StyleSheet.create({
   warningCard: { backgroundColor: '#FFF2DF', borderRadius: 15, padding: 14, marginTop: 14 },
   warningText: { color: INK, fontSize: 13, lineHeight: 19 },
   settingsLink: { color: '#9B5D00', fontSize: 11, fontWeight: '900', marginTop: 10 },
-  challengeGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', columnGap: 10, rowGap: 13, paddingBottom: 12 },
-  challengeCard: { width: '100%', height: 224, borderRadius: 21, padding: 0, borderWidth: 2, borderColor: 'transparent', position: 'relative', overflow: 'hidden', transform: [{ rotate: '-1deg' }] },
-  challengeCardSelected: { borderColor: '#17131B' },
-  challengeArtwork: { flex: 1, overflow: 'hidden' },
-  challengeTitle: { color: '#17131B', fontSize: 14, fontWeight: '900', textAlign: 'center', paddingHorizontal: 6, paddingVertical: 9 },
+  challengeGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', columnGap: 0, rowGap: 9, paddingBottom: 12 },
+  challengeCard: { width: '100%', height: 190, borderRadius: 18, padding: 0, borderWidth: 2, borderColor: '#E1E9E2', position: 'relative', overflow: 'hidden', backgroundColor: '#FFFFFF' },
+  challengeCardSelected: { borderColor: '#218B57', backgroundColor: '#F3FBF5' },
+  challengeCardUnavailable: { opacity: 0.55 },
+  challengeArtwork: { height: 78, overflow: 'hidden', margin: 7, borderRadius: 12 },
+  challengeCopy: { paddingHorizontal: 9, flex: 1 },
+  challengeTitle: { color: '#17131B', fontSize: 13, lineHeight: 16, fontWeight: '900', textAlign: 'left', paddingHorizontal: 0, paddingVertical: 2 },
+  challengeDescription: { color: '#77736F', fontSize: 11, lineHeight: 14 },
+  challengeMetaRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 2, paddingTop: 4, paddingBottom: 6 },
+  challengeMeta: { color: '#218B57', fontSize: 9, fontWeight: '900' },
+  challengeMissionIcon: { position: 'absolute', top: 11, right: 11, width: 27, height: 27, borderRadius: 14, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  challengeMissionIconText: { color: '#218B57', fontSize: 17, fontWeight: '900' },
+  challengeConfigPanel: { width: '100%', backgroundColor: '#F3F8F4', borderRadius: 14, padding: 11, marginBottom: 8 },
+  challengeConfigHeading: { color: '#4C5850', fontSize: 10, letterSpacing: 0.8, fontWeight: '900', marginBottom: 8 },
+  challengeConfigChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+  challengeConfigChoice: { minHeight: 34, paddingHorizontal: 10, borderRadius: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E3EAE4', alignItems: 'center', justifyContent: 'center' },
+  challengeConfigChoiceSelected: { backgroundColor: '#218B57', borderColor: '#218B57' },
+  challengeConfigChoiceText: { color: '#525B54', fontSize: 11, fontWeight: '800' },
+  challengeConfigChoiceTextSelected: { color: '#FFFFFF' },
   challengeCheck: { position: 'absolute', right: 10, top: 10, color: '#17131B', fontSize: 17, fontWeight: '900', width: 25, height: 25, borderRadius: 13, backgroundColor: '#FFFFFF', textAlign: 'center', lineHeight: 25 },
   challengeContinueButton: { minHeight: 57, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#17131B', shadowOpacity: 0, elevation: 0 },
   challengeContinueText: { color: '#17131B' },

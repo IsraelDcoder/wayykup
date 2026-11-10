@@ -8,10 +8,8 @@ type AlarmSchedule = {
   time: string;
   days: string[];
   enabled: boolean;
-  task: string;
-  mathDifficulty?: string;
+  task: 'Yell to Stop' | 'Push-up Challenge' | 'Shake Your Phone' | 'Object Hunt';
   sound: string;
-  shakeCount?: number;
 };
 
 type OccurrenceRow = Occurrence & {
@@ -19,9 +17,6 @@ type OccurrenceRow = Occurrence & {
   completedAt: number | null;
   morningRating: number | null;
   shakesCounted: number | null;
-  steps: number | null;
-  mathCorrect: number | null;
-  mathAttempts: number | null;
   challengeDurationMs: number | null;
 };
 
@@ -63,14 +58,19 @@ export async function getStatsDatabase(): Promise<SQLite.SQLiteDatabase> {
           soundId TEXT NOT NULL,
           morningRating INTEGER CHECK (morningRating BETWEEN 1 AND 5),
           shakesCounted INTEGER,
-          steps INTEGER,
-          mathCorrect INTEGER,
-          mathAttempts INTEGER,
           challengeDurationMs INTEGER,
           UNIQUE (alarmId, localDate)
         );
         CREATE INDEX IF NOT EXISTS occurrences_localDate_idx ON occurrences(localDate);
         CREATE INDEX IF NOT EXISTS occurrences_scheduledAt_idx ON occurrences(scheduledAt);
+        UPDATE occurrences
+          SET challenge = CASE challenge
+            WHEN 'yell' THEN 'yell_to_stop'
+            WHEN 'push_ups' THEN 'push_up'
+            WHEN 'shake' THEN 'shake_phone'
+            ELSE 'legacy'
+          END
+          WHERE challenge NOT IN ('yell_to_stop','push_up','shake_phone','object_hunt','legacy');
         CREATE TABLE IF NOT EXISTS streak_freezes (
           id TEXT PRIMARY KEY NOT NULL,
           earnedAt INTEGER NOT NULL,
@@ -88,18 +88,13 @@ export async function getStatsDatabase(): Promise<SQLite.SQLiteDatabase> {
   return databasePromise;
 }
 
-function challengeForTask(task: string): OccurrenceInput['challenge'] {
-  if (task === 'Math') return 'math';
-  if (task === 'Shake') return 'shake';
-  if (task === 'QR scan') return 'qr';
-  if (task === 'Memory') return 'memory';
-  if (task === 'Object Hunt') return 'object_hunt';
-  if (task === 'Toothbrush') return 'toothbrush';
-  if (task === 'Push-ups') return 'push_ups';
-  if (task === 'Squats') return 'squats';
-  if (task === 'Yell to Wake') return 'yell';
-  if (task === 'Face Challenge') return 'face';
-  return 'exercise';
+function challengeForTask(task: AlarmSchedule['task']): OccurrenceInput['challenge'] {
+  switch (task) {
+    case 'Yell to Stop': return 'yell_to_stop';
+    case 'Push-up Challenge': return 'push_up';
+    case 'Shake Your Phone': return 'shake_phone';
+    case 'Object Hunt': return 'object_hunt';
+  }
 }
 
 function tierForAttempts(failedAttempts: number, rearms = 0): Occurrence['tierReached'] {
@@ -128,9 +123,7 @@ export function makeOccurrence(alarm: AlarmSchedule, date: Date, tz: string): Oc
     scheduledAt: scheduledDate.getTime(),
     status: 'scheduled',
     challenge: challengeForTask(alarm.task),
-    difficulty: alarm.task === 'Math'
-      ? alarm.mathDifficulty === 'Hard' ? 3 : alarm.mathDifficulty === 'Easy' ? 1 : 2
-      : alarm.task === 'Shake' ? Math.round((alarm.shakeCount ?? 100) / 50) : 1,
+    difficulty: alarm.task === 'Shake Your Phone' ? 2 : 1,
     tierReached: 'gentle',
     failedAttempts: 0,
     rearms: 0,
@@ -255,7 +248,7 @@ export async function recordRearm(occurrenceId: string): Promise<void> {
 export async function completeOccurrence(
   occurrenceId: string,
   completedAt: number,
-  details: { shakesCounted?: number; steps?: number; mathCorrect?: number; mathAttempts?: number; challengeDurationMs?: number },
+  details: { shakesCounted?: number; challengeDurationMs?: number },
   fallbackOccurrence: OccurrenceInput,
   firstRingAt: number,
 ): Promise<void> {
@@ -264,9 +257,8 @@ export async function completeOccurrence(
     await database.runAsync(
       `INSERT INTO occurrences
         (id, alarmId, localDate, tz, scheduledAt, firstRingAt, completedAt, status, challenge,
-         difficulty, tierReached, failedAttempts, rearms, soundId, shakesCounted, steps,
-         mathCorrect, mathAttempts, challengeDurationMs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 'gentle', 0, 0, ?, ?, ?, ?, ?, ?)
+         difficulty, tierReached, failedAttempts, rearms, soundId, shakesCounted, challengeDurationMs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 'gentle', 0, 0, ?, ?, ?)
        ON CONFLICT(alarmId, localDate) DO UPDATE SET
          id = excluded.id, tz = excluded.tz, scheduledAt = excluded.scheduledAt,
          firstRingAt = COALESCE(occurrences.firstRingAt, excluded.firstRingAt),
@@ -274,8 +266,7 @@ export async function completeOccurrence(
          challenge = excluded.challenge, difficulty = excluded.difficulty,
          tierReached = CASE WHEN occurrences.failedAttempts + occurrences.rearms >= 3 THEN 'brutal'
            WHEN occurrences.failedAttempts + occurrences.rearms > 0 THEN 'standard' ELSE 'gentle' END,
-         soundId = excluded.soundId, shakesCounted = excluded.shakesCounted, steps = excluded.steps,
-         mathCorrect = excluded.mathCorrect, mathAttempts = excluded.mathAttempts,
+         soundId = excluded.soundId, shakesCounted = excluded.shakesCounted,
          challengeDurationMs = excluded.challengeDurationMs`,
       fallbackOccurrence.id,
       fallbackOccurrence.alarmId,
@@ -288,9 +279,6 @@ export async function completeOccurrence(
       fallbackOccurrence.difficulty,
       fallbackOccurrence.soundId,
       details.shakesCounted ?? null,
-      details.steps ?? null,
-      details.mathCorrect ?? null,
-      details.mathAttempts ?? null,
       details.challengeDurationMs ?? null,
     );
     if (fallbackOccurrence.id !== occurrenceId) {

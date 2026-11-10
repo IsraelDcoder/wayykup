@@ -6,6 +6,8 @@ import UIKit
 import UserNotifications
 import Vision
 import AVFoundation
+import ImageIO
+import Speech
 
 #if canImport(AlarmKit)
 import AlarmKit
@@ -13,60 +15,127 @@ import AppIntents
 import SwiftUI
 #endif
 
+private func removeCachedCameraImage(at url: URL) {
+  let fileManager = FileManager.default
+  let cacheRoots = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
+    .map { $0.standardizedFileURL.path } + [fileManager.temporaryDirectory.standardizedFileURL.path]
+  let path = url.standardizedFileURL.path
+  guard cacheRoots.contains(where: { path.hasPrefix($0 + "/") }) else { return }
+  do {
+    try fileManager.removeItem(at: url)
+  } catch {
+    NSLog("WayykupAlarm could not remove temporary camera image: %@", error.localizedDescription)
+  }
+}
+
 public final class WayykupAlarmModule: Module {
-  private let microphoneMeter = MicrophoneMeter()
+  private lazy var speechPhraseRecognizer = SpeechPhraseRecognizer { [weak self] result in
+    self?.sendEvent("speechResult", result)
+  } onError: { [weak self] reason in
+    self?.sendEvent("speechError", ["reason": reason])
+  }
 
   public func definition() -> ModuleDefinition {
     Name("WayykupAlarm")
-    Events("ringStarted", "challengeCompleted", "healthChanged", "microphoneLevel", "microphoneError")
+    Events("ringStarted", "challengeCompleted", "healthChanged", "speechResult", "speechError")
 
     AsyncFunction("schedule") { (alarm: [String: Any]) async throws in
       try await NativeAlarmScheduler.schedule(alarm)
     }
 
-    AsyncFunction("classifyImage") { (uri: String) throws -> [[String: Any]] in
+    AsyncFunction("detectPushUpPose") { (uri: String) throws -> [String: Any] in
+      guard let url = URL(string: uri), url.isFileURL else {
+        throw NativeAlarmError.invalidAlarm("Wayykup could not access the captured push-up image.")
+      }
+      defer { removeCachedCameraImage(at: url) }
+      let request = VNDetectHumanBodyPoseRequest()
+      try VNImageRequestHandler(url: url, options: [:]).perform([request])
+      guard let observation = request.results?.first else { return [:] }
+      let recognizedPoints = try observation.recognizedPoints(.all)
+      let joints: [(String, VNHumanBodyPoseObservation.JointName)] = [
+        ("leftShoulder", .leftShoulder),
+        ("leftElbow", .leftElbow),
+        ("leftWrist", .leftWrist),
+        ("leftHip", .leftHip),
+        ("leftAnkle", .leftAnkle),
+        ("rightShoulder", .rightShoulder),
+        ("rightElbow", .rightElbow),
+        ("rightWrist", .rightWrist),
+        ("rightHip", .rightHip),
+        ("rightAnkle", .rightAnkle),
+      ]
+      var pose: [String: Any] = [:]
+      for (name, joint) in joints {
+        guard let point = recognizedPoints[joint] else { continue }
+        pose[name] = [
+          "x": Double(point.location.x),
+          "y": Double(1 - point.location.y),
+          "confidence": Double(point.confidence),
+        ]
+      }
+      return pose
+    }
+
+    AsyncFunction("classifyImage") { (uri: String, target: String) throws -> [[String: Any]] in
       guard let url = URL(string: uri), url.isFileURL else {
         throw NativeAlarmError.invalidAlarm("Wayykup could not access the captured object photo.")
       }
-      let request = VNClassifyImageRequest()
-      try VNImageRequestHandler(url: url, options: [:]).perform([request])
-      return (request.results ?? []).prefix(12).map { observation -> [String: Any] in
-        [
-          "label": observation.identifier,
-          "confidence": Double(observation.confidence)
-        ]
+      defer { removeCachedCameraImage(at: url) }
+      guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw NativeAlarmError.invalidAlarm("Wayykup could not decode the captured object photo or target.")
       }
-    }
+      var confidences: [String: Float] = [:]
+      func classify(_ image: CGImage) throws {
+        let request = VNClassifyImageRequest()
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        for result in request.results ?? [] {
+          confidences[result.identifier] = max(confidences[result.identifier] ?? 0, result.confidence)
+        }
+      }
 
-    AsyncFunction("importSound") { (uri: String, name: String) throws -> [String: String] in
-      guard let source = URL(string: uri), source.isFileURL else {
-        throw NativeAlarmError.invalidAlarm("Wayykup could not access the selected audio file.")
+      try classify(image)
+      let centerCrop = CGRect(
+        x: CGFloat(image.width) * 0.2,
+        y: CGFloat(image.height) * 0.2,
+        width: CGFloat(image.width) * 0.6,
+        height: CGFloat(image.height) * 0.6
+      )
+      if let crop = image.cropping(to: centerCrop) {
+        try classify(crop)
       }
-      let fileExtension = source.pathExtension.isEmpty
-        ? URL(fileURLWithPath: name).pathExtension.lowercased()
-        : source.pathExtension.lowercased()
-      guard ["mp3", "m4a", "aac", "wav", "caf", "aiff", "aif"].contains(fileExtension) else {
-        throw NativeAlarmError.invalidAlarm("Choose an MP3, M4A, AAC, WAV, CAF, or AIFF audio file.")
+
+      let saliencyRequest = VNGenerateObjectnessBasedSaliencyImageRequest()
+      try VNImageRequestHandler(cgImage: image, options: [:]).perform([saliencyRequest])
+      let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+      let salientObjects = saliencyRequest.results?.first?.salientObjects ?? []
+      for object in salientObjects.sorted(by: { $0.confidence > $1.confidence }).prefix(6) {
+        let box = object.boundingBox
+        let paddingX = box.width * 0.12
+        let paddingY = box.height * 0.12
+        let normalizedBox = CGRect(
+          x: max(0, box.minX - paddingX),
+          y: max(0, box.minY - paddingY),
+          width: min(1, box.width + paddingX * 2),
+          height: min(1, box.height + paddingY * 2)
+        ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        let cropRect = CGRect(
+          x: normalizedBox.minX * CGFloat(image.width),
+          y: (1 - normalizedBox.maxY) * CGFloat(image.height),
+          width: normalizedBox.width * CGFloat(image.width),
+          height: normalizedBox.height * CGFloat(image.height)
+        ).integral.intersection(imageBounds)
+        guard cropRect.width >= 24, cropRect.height >= 24,
+              let crop = image.cropping(to: cropRect) else { continue }
+        try classify(crop)
       }
-      if let attributes = try? FileManager.default.attributesOfItem(atPath: source.path),
-         let size = attributes[.size] as? NSNumber,
-         size.int64Value > 100 * 1024 * 1024 {
-        throw NativeAlarmError.invalidAlarm("Choose an audio file smaller than 100 MB.")
-      }
-      let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-      let directory = library.appendingPathComponent("Sounds", isDirectory: true)
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      let destination = directory.appendingPathComponent("\(UUID().uuidString).\(fileExtension)")
-      let hasScopedAccess = source.startAccessingSecurityScopedResource()
-      defer {
-        if hasScopedAccess { source.stopAccessingSecurityScopedResource() }
-      }
-      try FileManager.default.copyItem(at: source, to: destination)
-      return [
-        "uri": destination.absoluteString,
-        "name": destination.lastPathComponent,
-        "displayName": URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
-      ]
+
+      NSLog("Wayykup object recognition target=%@ regions=%d", target, salientObjects.count + 2)
+      return confidences
+        .sorted { $0.value > $1.value }
+        .prefix(48)
+        .map { ["label": $0.key, "confidence": Double($0.value)] }
     }
 
     AsyncFunction("cancel") { (alarmId: String) async throws in
@@ -77,12 +146,20 @@ public final class WayykupAlarmModule: Module {
       try await NativeAlarmScheduler.rearm(alarmId: alarmId, delaySeconds: delaySeconds)
     }
 
-    AsyncFunction("cancelChain") { (alarmId: String, status: String) async throws in
+    AsyncFunction("activateChallenge") { (alarmId: String, occurrenceId: String) throws in
+      try NativeAlarmScheduler.activateChallenge(alarmId: alarmId, occurrenceId: occurrenceId)
+    }
+
+    AsyncFunction("cancelChain") { (alarmId: String, status: String, occurrenceId: String) async throws in
       let ring = NativeAlarmScheduler.pendingRing
-      try await NativeAlarmScheduler.cancelChain(alarmId: alarmId, status: status)
+      try await NativeAlarmScheduler.cancelChain(
+        alarmId: alarmId,
+        status: status,
+        occurrenceId: occurrenceId
+      )
       self.sendEvent("challengeCompleted", [
         "alarmId": alarmId,
-        "occurrenceId": ring?["occurrenceId"] as? String ?? ""
+        "occurrenceId": ring?["occurrenceId"] as? String ?? occurrenceId
       ])
     }
 
@@ -111,14 +188,12 @@ public final class WayykupAlarmModule: Module {
       try await NativeAlarmScheduler.scheduleTest()
     }
 
-    AsyncFunction("startMicrophoneMeter") { () throws in
-      try self.microphoneMeter.start { dbfs in
-        self.sendEvent("microphoneLevel", ["dbfs": dbfs])
-      }
+    AsyncFunction("startSpeechRecognition") { (phrase: String) async throws in
+      try await self.speechPhraseRecognizer.start(phrase: phrase)
     }
 
-    AsyncFunction("stopMicrophoneMeter") {
-      self.microphoneMeter.stop()
+    AsyncFunction("stopSpeechRecognition") {
+      self.speechPhraseRecognizer.stop()
     }
 
     AsyncFunction("setAlarmAudioDucked") { (_: Bool, _: Double) throws in
@@ -128,66 +203,110 @@ public final class WayykupAlarmModule: Module {
     }
 
     OnDestroy {
-      self.microphoneMeter.stop()
+      self.speechPhraseRecognizer.stop()
     }
   }
 }
 
-private final class MicrophoneMeter {
+private final class SpeechPhraseRecognizer {
+  private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
   private let engine = AVAudioEngine()
-  private var isRunning = false
+  private let emitResult: ([String: Any]) -> Void
+  private let emitError: (String) -> Void
+  private var request: SFSpeechAudioBufferRecognitionRequest?
+  private var task: SFSpeechRecognitionTask?
+  private var expectedPhrase = ""
+  private var recognitionActive = false
+  private var tapInstalled = false
 
-  func start(onLevel: @escaping (Double) -> Void) throws {
-    guard !isRunning else { return }
-    let session = AVAudioSession.sharedInstance()
+  init(
+    onResult: @escaping ([String: Any]) -> Void,
+    onError: @escaping (String) -> Void
+  ) {
+    emitResult = onResult
+    emitError = onError
+  }
+
+  func start(phrase: String) async throws {
+    guard let recognizer, recognizer.isAvailable else {
+      throw NativeAlarmError.invalidAlarm("English speech recognition is unavailable on this device.")
+    }
+    guard recognizer.supportsOnDeviceRecognition else {
+      throw NativeAlarmError.invalidAlarm("On-device English speech recognition is unavailable. Download the English speech model in Settings and try again.")
+    }
+    let authorization = await withCheckedContinuation { continuation in
+      SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+    }
+    guard authorization == .authorized else {
+      throw NativeAlarmError.invalidAlarm("Allow speech recognition in Settings to use Yell to Stop.")
+    }
+
+    stop()
+    expectedPhrase = Self.normalized(phrase)
+    let audioSession = AVAudioSession.sharedInstance()
+    try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth])
+    try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+
+    let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+    recognitionRequest.shouldReportPartialResults = true
+    recognitionRequest.requiresOnDeviceRecognition = true
+    request = recognitionRequest
     let input = engine.inputNode
-    var tapInstalled = false
+    input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
+      recognitionRequest.append(buffer)
+    }
+    tapInstalled = true
+    engine.prepare()
     do {
-      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
-      try session.setActive(true, options: .notifyOthersOnDeactivation)
-      guard let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) else {
-        throw NSError(domain: "WayykupMicrophoneMeter", code: 2, userInfo: [
-          NSLocalizedDescriptionKey: "The built-in microphone is unavailable."
-        ])
-      }
-      try session.setPreferredInput(builtInMic)
-      let format = input.outputFormat(forBus: 0)
-      guard format.channelCount > 0 else {
-        throw NSError(domain: "WayykupMicrophoneMeter", code: 1, userInfo: [
-          NSLocalizedDescriptionKey: "The built-in microphone is unavailable."
-        ])
-      }
-      input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-        guard let channel = buffer.floatChannelData?.pointee else { return }
-        let count = Int(buffer.frameLength)
-        guard count > 0 else { return }
-        var sumSquares = 0.0
-        for index in 0..<count {
-          let value = Double(channel[index])
-          sumSquares += value * value
-        }
-        let rms = sqrt(sumSquares / Double(count))
-        let dbfs = rms <= 0.00001 ? -100.0 : max(-100.0, 20.0 * log10(rms))
-        onLevel(dbfs)
-      }
-      tapInstalled = true
-      engine.prepare()
       try engine.start()
-      isRunning = true
     } catch {
-      if tapInstalled { input.removeTap(onBus: 0) }
-      engine.stop()
-      try? session.setActive(false, options: .notifyOthersOnDeactivation)
+      stop()
       throw error
+    }
+    recognitionActive = true
+    task = recognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+      guard let self else { return }
+      guard self.recognitionActive else { return }
+      if let result {
+        let text = result.bestTranscription.formattedString
+        let segments = result.bestTranscription.segments
+        let confidence = segments.isEmpty
+          ? 0
+          : Double(segments.reduce(Float.zero) { $0 + $1.confidence } / Float(segments.count))
+        let recognized = confidence >= 0.35
+          && Self.normalized(text) == self.expectedPhrase
+        if result.isFinal || recognized {
+          self.emitResult(["recognized": recognized, "text": text, "confidence": confidence])
+          self.stop()
+        }
+      }
+      if let error {
+        self.emitError(error.localizedDescription)
+        self.stop()
+      }
     }
   }
 
   func stop() {
-    guard isRunning else { return }
-    engine.inputNode.removeTap(onBus: 0)
-    engine.stop()
-    isRunning = false
+    recognitionActive = false
+    if tapInstalled {
+      engine.inputNode.removeTap(onBus: 0)
+      tapInstalled = false
+    }
+    if engine.isRunning { engine.stop() }
+    request?.endAudio()
+    task?.cancel()
+    request = nil
+    task = nil
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+  }
+
+  private static func normalized(_ value: String) -> String {
+    value.lowercased()
+      .replacingOccurrences(of: "i'm", with: "im")
+      .replacingOccurrences(of: "i am", with: "im")
+      .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+      .joined(separator: " ")
   }
 }
 
@@ -197,6 +316,12 @@ private enum NativeAlarmScheduler {
   private static let pendingKey = "wayykup_pending_ring"
   private static let testPassedKey = "wayykup_test_alarm_passed"
   private static let testAlarmId = "__wayykup_test_alarm__"
+  private static let supportedTasks: Set<String> = [
+    "Yell to Stop",
+    "Push-up Challenge",
+    "Shake Your Phone",
+    "Object Hunt",
+  ]
 
   static var pendingRing: [String: Any]? {
     prefs.dictionary(forKey: pendingKey)
@@ -210,16 +335,27 @@ private enum NativeAlarmScheduler {
     guard let alarmId = alarm["id"] as? String else {
       throw NativeAlarmError.invalidAlarm("Alarm id is required.")
     }
+    guard let task = alarm["task"] as? String, supportedTasks.contains(task) else {
+      throw NativeAlarmError.invalidAlarm("Choose one of the four supported wake-up challenges before scheduling this alarm.")
+    }
     let currentHealth = await health()
     guard currentHealth["canSchedule"] as? Bool == true else {
       throw NativeAlarmError.permissionDenied
     }
-    prefs.set(alarm, forKey: "\(alarmsKey).\(alarmId)")
+    if let pendingRing,
+       pendingRing["alarmId"] as? String == alarmId,
+       ["ringing", "challenge_pending", "challenge_active"].contains(pendingRing["state"] as? String ?? "") {
+      prefs.set(alarm, forKey: "\(alarmsKey).\(alarmId)")
+      NSLog("WayykupAlarm event=schedule_skipped reason=occurrence_active alarmId=%@", alarmId)
+      return
+    }
     guard alarm["enabled"] as? Bool != false else {
       try await cancel(alarmId: alarmId, removeDefinition: true)
       return
     }
     let date = try nextDate(for: alarm, after: Date())
+    try await cancelScheduledAlarm(alarmId: alarmId)
+    prefs.set(alarm, forKey: "\(alarmsKey).\(alarmId)")
     NSLog(
       "WayykupAlarm event=scheduled alarmId=%@ scheduledAt=%.0f device=%@ os=%@",
       alarmId,
@@ -229,34 +365,48 @@ private enum NativeAlarmScheduler {
     )
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
+      NSLog("WayykupAlarm event=schedule_engine engine=AlarmKit alarmId=%@", alarmId)
       try await scheduleAlarmKit(alarm, alarmId: alarmId, date: date)
       return
     }
+    NSLog("WayykupAlarm event=schedule_engine engine=notification_fallback reason=ios_below_26 alarmId=%@", alarmId)
+    #else
+    NSLog("WayykupAlarm event=schedule_engine engine=notification_fallback reason=AlarmKit_framework_unavailable alarmId=%@", alarmId)
     #endif
     try await scheduleNotificationFallback(alarm, alarmId: alarmId, date: date)
   }
 
   static func cancel(alarmId: String, removeDefinition: Bool) async throws {
+    try await cancelScheduledAlarm(alarmId: alarmId)
+    if removeDefinition {
+      prefs.removeObject(forKey: "\(alarmsKey).\(alarmId)")
+    }
+  }
+
+  private static func cancelScheduledAlarm(alarmId: String) async throws {
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
-      let ids = (prefs.array(forKey: chainKey(alarmId)) as? [String] ?? [])
+      var ids = prefs.array(forKey: chainKey(alarmId)) as? [String] ?? []
+      if let alarmIdValue = prefs.string(forKey: alarmKitIdKey(alarmId)) {
+        ids.append(alarmIdValue)
+      }
       for value in ids {
         guard let id = UUID(uuidString: value) else { continue }
-        try AlarmManager.shared.cancel(id: id)
-      }
-      if let value = prefs.string(forKey: alarmKitIdKey(alarmId)), let id = UUID(uuidString: value) {
         try AlarmManager.shared.cancel(id: id)
       }
     }
     #endif
     let center = UNUserNotificationCenter.current()
-    center.removePendingNotificationRequests(withIdentifiers: notificationIds(alarmId))
-    center.removeDeliveredNotifications(withIdentifiers: notificationIds(alarmId))
+    let identifiers = Set(
+      (prefs.stringArray(forKey: notificationIdsKey(alarmId)) ?? [])
+        + notificationIds(alarmId)
+    )
+    center.removePendingNotificationRequests(withIdentifiers: Array(identifiers))
+    center.removeDeliveredNotifications(withIdentifiers: Array(identifiers))
+    prefs.removeObject(forKey: notificationIdsKey(alarmId))
     prefs.removeObject(forKey: chainKey(alarmId))
-    if removeDefinition {
-      prefs.removeObject(forKey: "\(alarmsKey).\(alarmId)")
-      prefs.removeObject(forKey: alarmKitIdKey(alarmId))
-    }
+    prefs.removeObject(forKey: alarmKitIdKey(alarmId))
+    prefs.removeObject(forKey: "wayykup_chain_started_\(alarmId)")
   }
 
   static func rearm(alarmId: String, delaySeconds: Double = 75) async throws {
@@ -269,25 +419,67 @@ private enum NativeAlarmScheduler {
     try await scheduleNotificationRearm(alarmId: alarmId, delaySeconds: delaySeconds)
   }
 
-  static func cancelChain(alarmId: String, status: String) async throws {
-    #if canImport(AlarmKit)
-    if #available(iOS 26.0, *) {
-      for value in prefs.array(forKey: chainKey(alarmId)) as? [String] ?? [] {
-        guard let id = UUID(uuidString: value) else { continue }
-        try AlarmManager.shared.cancel(id: id)
+  static func activateChallenge(alarmId: String, occurrenceId: String) throws {
+    var ring = pendingRing
+    if ring?["alarmId"] as? String != alarmId || ring?["occurrenceId"] as? String != occurrenceId {
+      guard let alarm = prefs.dictionary(forKey: "\(alarmsKey).\(alarmId)") else {
+        throw NativeAlarmError.invalidAlarm("The active alarm occurrence could not be restored.")
       }
+      let now = Date().timeIntervalSince1970 * 1000
+      ring = [
+        "alarmId": alarmId,
+        "occurrenceId": occurrenceId,
+        "at": now,
+        "scheduledAt": now,
+        "timeZone": TimeZone.current.identifier,
+        "challenge": alarm["task"] as? String ?? "Shake Your Phone",
+        "sound": alarm["sound"] as? String ?? "police_siren",
+        "testAlarm": alarmId == testAlarmId,
+        "state": "ringing"
+      ]
     }
-    #endif
-    let center = UNUserNotificationCenter.current()
-    center.removePendingNotificationRequests(withIdentifiers: chainNotificationIds(alarmId))
-    prefs.removeObject(forKey: chainKey(alarmId))
-    let isTestAlarm = pendingRing?["testAlarm"] as? Bool == true || alarmId.hasPrefix(testAlarmId)
+    guard var activeRing = ring else {
+      throw NativeAlarmError.invalidAlarm("The active alarm occurrence is unavailable.")
+    }
+    let state = activeRing["state"] as? String ?? "ringing"
+    if state == "challenge_active" { return }
+    guard state == "ringing" || state == "challenge_pending" else {
+      throw NativeAlarmError.invalidAlarm("This alarm occurrence cannot start its challenge from state \(state).")
+    }
+    activeRing["state"] = "challenge_pending"
+    prefs.set(activeRing, forKey: pendingKey)
+    activeRing["state"] = "challenge_active"
+    prefs.set(activeRing, forKey: pendingKey)
+  }
+
+  static func cancelChain(alarmId: String, status: String, occurrenceId: String) async throws {
+    guard status == "completed" else {
+      throw NativeAlarmError.invalidAlarm("Only a successfully completed challenge can dismiss an alarm.")
+    }
+    guard var ring = pendingRing,
+          ring["alarmId"] as? String == alarmId,
+          ring["occurrenceId"] as? String == occurrenceId else {
+      if (prefs.stringArray(forKey: "wayykup_dismissed_occurrences") ?? []).contains(occurrenceId) { return }
+      throw NativeAlarmError.invalidAlarm("The active alarm occurrence does not match the completed challenge.")
+    }
+    let state = ring["state"] as? String ?? "ringing"
+    guard state == "challenge_active" || state == "challenge_completed" || state == "dismissed" else {
+      throw NativeAlarmError.invalidAlarm("The challenge must be active before it can be completed.")
+    }
+    if state == "dismissed" { return }
+    ring["state"] = "challenge_completed"
+    prefs.set(ring, forKey: pendingKey)
+    try await cancelScheduledAlarm(alarmId: alarmId)
+    let isTestAlarm = ring["testAlarm"] as? Bool == true || alarmId.hasPrefix(testAlarmId)
     if status == "completed", isTestAlarm {
       prefs.set(true, forKey: testPassedKey)
     }
-    if let occurrenceId = pendingRing?["occurrenceId"] as? String {
-      NativeOccurrenceStore.resolve(occurrenceId: occurrenceId, status: status)
-    }
+    NativeOccurrenceStore.resolve(occurrenceId: occurrenceId, status: status)
+    ring["state"] = "dismissed"
+    prefs.set(ring, forKey: pendingKey)
+    var dismissed = Set(prefs.stringArray(forKey: "wayykup_dismissed_occurrences") ?? [])
+    dismissed.insert(occurrenceId)
+    prefs.set(Array(dismissed), forKey: "wayykup_dismissed_occurrences")
     NSLog(
       "WayykupAlarm event=challengeCompleted alarmId=%@ status=%@ at=%.0f device=%@",
       alarmId,
@@ -365,11 +557,11 @@ private enum NativeAlarmScheduler {
       "time": String(format: "%02d:%02d", calendar.component(.hour, from: date), calendar.component(.minute, from: date)),
       "days": [String](),
       "enabled": true,
-      "task": "Math",
-      "sound": "Air raid",
-      "mathDifficulty": "Easy",
+      "task": "Shake Your Phone",
+      "sound": "police_siren",
       "testAlarm": true
     ]
+    try await cancelScheduledAlarm(alarmId: testAlarmId)
     prefs.set(alarm, forKey: "\(alarmsKey).\(testAlarmId)")
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
@@ -410,6 +602,10 @@ private enum NativeAlarmScheduler {
     ["wayykup.\(alarmId).base"] + chainNotificationIds(alarmId)
   }
 
+  private static func notificationIdsKey(_ alarmId: String) -> String {
+    "wayykup_notification_ids_\(alarmId)"
+  }
+
   private static func chainNotificationIds(_ alarmId: String) -> [String] {
     (0..<24).map { "wayykup.\(alarmId).rearm.\($0)" }
   }
@@ -421,66 +617,111 @@ private enum NativeAlarmScheduler {
     let center = UNUserNotificationCenter.current()
     let pending = await center.pendingNotificationRequests()
     let related = Set(notificationIds(alarmId))
-    let available = pending.filter { !related.contains($0.identifier) }.count
-    guard available + 25 <= 64 else {
+    let storedIdentifiers = Set(prefs.stringArray(forKey: notificationIdsKey(alarmId)) ?? [])
+    let available = pending.filter { !related.contains($0.identifier) && !storedIdentifiers.contains($0.identifier) }.count
+    let availableSlots = 64 - available
+    guard availableSlots > 0 else {
       throw NativeAlarmError.tooManyNotifications
     }
-    center.removePendingNotificationRequests(withIdentifiers: notificationIds(alarmId))
-    let occurrenceId = occurrenceIdentifier(alarmId: alarmId, date: date)
-    let firstRingAt = date.timeIntervalSince1970
-    let baseContent = notificationContent(alarm: alarm, occurrenceId: occurrenceId, scheduledAt: firstRingAt)
-    try await center.add(
-      UNNotificationRequest(
-        identifier: "wayykup.\(alarmId).base",
-        content: baseContent,
-        trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(1, date.timeIntervalSinceNow), repeats: false)
-      )
-    )
-    for index in 0..<24 {
-      var content = notificationContent(alarm: alarm, occurrenceId: occurrenceId, scheduledAt: firstRingAt)
-      content.title = "WAYYKUP · ALARM CONTINUES"
-      content.body = "Your wake-up challenge is still waiting."
-      try await center.add(
-        UNNotificationRequest(
-          identifier: "wayykup.\(alarmId).rearm.\(index)",
-          content: content,
-          trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(1, date.timeIntervalSinceNow) + Double((index + 1) * 75), repeats: false)
+    let allAlarmValues = prefs.dictionaryRepresentation()
+      .filter { $0.key.hasPrefix("\(alarmsKey).") }
+      .map { $0.value }
+    let enabledAlarmCount = max(1, allAlarmValues.reduce(into: 0) { count, value in
+      if ((value as? [String: Any])?["enabled"] as? Bool) != false { count += 1 }
+    })
+    let occurrenceLimit = min(7, max(1, availableSlots / enabledAlarmCount))
+    let days = alarm["days"] as? [String] ?? []
+    let occurrenceCount = days.isEmpty ? 1 : occurrenceLimit
+    var occurrenceDate = date
+    var requestIds: [String] = []
+    do {
+      for index in 0..<occurrenceCount {
+        if index > 0 {
+          occurrenceDate = try nextDate(for: alarm, after: occurrenceDate)
+        }
+        let occurrenceId = occurrenceIdentifier(alarmId: alarmId, date: occurrenceDate)
+        let scheduledAt = occurrenceDate.timeIntervalSince1970 * 1000
+        let identifier = "wayykup.\(alarmId).\(occurrenceId.replacingOccurrences(of: ":", with: "."))"
+        let content = notificationContent(alarm: alarm, occurrenceId: occurrenceId, scheduledAt: scheduledAt)
+        try await center.add(
+          UNNotificationRequest(
+            identifier: identifier,
+            content: content,
+            trigger: UNTimeIntervalNotificationTrigger(
+              timeInterval: max(1, occurrenceDate.timeIntervalSinceNow),
+              repeats: false
+            )
+          )
         )
-      )
+        requestIds.append(identifier)
+      }
+      prefs.set(requestIds, forKey: notificationIdsKey(alarmId))
+      prefs.removeObject(forKey: chainKey(alarmId))
+      NSLog("WayykupAlarm event=notification_fallback_scheduled alarmId=%@ occurrences=%d", alarmId, requestIds.count)
+    } catch {
+      center.removePendingNotificationRequests(withIdentifiers: requestIds)
+      throw error
     }
-    prefs.set(["\(alarmId):\(occurrenceId)"], forKey: chainKey(alarmId))
   }
 
   private static func scheduleNotificationRearm(alarmId: String, delaySeconds: Double) async throws {
     guard let alarm = prefs.dictionary(forKey: "\(alarmsKey).\(alarmId)") else { return }
     let now = Date()
-    if let start = prefs.object(forKey: "wayykup_chain_started_\(alarmId)") as? Date,
-       now.timeIntervalSince(start) >= 30 * 60 {
+    let chainStartedKey = "wayykup_chain_started_\(alarmId)"
+    let chainStartedAt = prefs.double(forKey: chainStartedKey)
+    if chainStartedAt == 0 {
+      prefs.set(now.timeIntervalSince1970, forKey: chainStartedKey)
+    } else if now.timeIntervalSince1970 - chainStartedAt >= 30 * 60 {
       if let occurrenceId = pendingRing?["occurrenceId"] as? String {
         NativeOccurrenceStore.resolve(occurrenceId: occurrenceId, status: "bypassed")
       }
       return
     }
-    try await scheduleNotificationFallback(alarm, alarmId: alarmId, date: now.addingTimeInterval(delaySeconds))
+    let idsKey = notificationIdsKey(alarmId)
+    var ids = prefs.stringArray(forKey: idsKey) ?? []
+    let rearmIds = ids.filter { $0.contains(".rearm.") }
+    guard rearmIds.count < 24 else {
+      if let occurrenceId = pendingRing?["occurrenceId"] as? String {
+        NativeOccurrenceStore.resolve(occurrenceId: occurrenceId, status: "bypassed")
+      }
+      return
+    }
+
+    let occurrenceId = pendingRing?["occurrenceId"] as? String
+      ?? occurrenceIdentifier(alarmId: alarmId, date: now)
+    let scheduledAt = pendingRing?["scheduledAt"] as? Double ?? now.timeIntervalSince1970 * 1000
+    let content = notificationContent(alarm: alarm, occurrenceId: occurrenceId, scheduledAt: scheduledAt)
+    content.title = "WAYYKUP · ALARM CONTINUES"
+    content.body = "Your wake-up challenge is still waiting. Prove you are awake."
+    let identifier = "wayykup.\(alarmId).rearm.\(rearmIds.count)"
+    try await UNUserNotificationCenter.current().add(
+      UNNotificationRequest(
+        identifier: identifier,
+        content: content,
+        trigger: UNTimeIntervalNotificationTrigger(
+          timeInterval: max(1, delaySeconds),
+          repeats: false
+        )
+      )
+    )
+    ids.append(identifier)
+    prefs.set(ids, forKey: idsKey)
   }
 
   private static func notificationContent(alarm: [String: Any], occurrenceId: String, scheduledAt: TimeInterval) -> UNMutableNotificationContent {
     let content = UNMutableNotificationContent()
     content.title = "WAYYKUP · TIME TO GET UP"
     content.body = "\(alarm["task"] as? String ?? "Wake-up") challenge. Prove you are awake."
-    if let customSoundName = alarm["customSoundName"] as? String {
-      content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: customSoundName))
-    } else {
-      content.sound = .default
-    }
+    let selectedSound = alarm["sound"] as? String ?? "police_siren"
+    content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: soundResource(for: selectedSound)))
     content.interruptionLevel = .timeSensitive
     content.userInfo = [
       "alarmId": alarm["id"] as? String ?? "",
       "occurrenceId": occurrenceId,
       "scheduledAt": scheduledAt,
       "timeZone": TimeZone.current.identifier,
-      "challenge": alarm["task"] as? String ?? "Math",
-      "sound": alarm["sound"] as? String ?? "Air raid"
+      "challenge": alarm["task"] as? String ?? "Shake Your Phone",
+      "sound": selectedSound
     ]
     return content
   }
@@ -503,14 +744,14 @@ private enum NativeAlarmScheduler {
     let metadata = WayykupAlarmMetadata(
       alarmId: alarmId,
       occurrenceId: occurrenceIdentifier(alarmId: alarmId, date: date),
-      challenge: alarm["task"] as? String ?? "Math",
-      sound: alarm["sound"] as? String ?? "Air raid",
+      challenge: alarm["task"] as? String ?? "Shake Your Phone",
+      sound: alarm["sound"] as? String ?? "police_siren",
       scheduledAt: date.timeIntervalSince1970 * 1000,
       timeZone: TimeZone.current.identifier
     )
     let alert = AlarmPresentation.Alert(
       title: LocalizedStringResource("WAYYKUP · TIME TO GET UP"),
-      stopButton: AlarmButton(text: LocalizedStringResource("Stop"), textColor: .white, systemImageName: "stop.fill"),
+      stopButton: AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "stop.fill"),
       secondaryButton: AlarmButton(text: LocalizedStringResource("Prove it"), textColor: .white, systemImageName: "arrow.up.forward.app"),
       secondaryButtonBehavior: .custom
     )
@@ -538,9 +779,7 @@ private enum NativeAlarmScheduler {
         scheduledAt: metadata.scheduledAt,
         timeZone: metadata.timeZone
       ),
-      sound: AlertConfiguration.AlertSound.named(
-        alarm["customSoundName"] as? String ?? soundResource(for: metadata.sound)
-      )
+      sound: AlertConfiguration.AlertSound.named(soundResource(for: metadata.sound))
     )
     try await AlarmManager.shared.schedule(id: id, configuration: configuration)
     prefs.set(id.uuidString, forKey: alarmKitIdKey(alarmId))
@@ -570,14 +809,14 @@ private enum NativeAlarmScheduler {
     let metadata = WayykupAlarmMetadata(
       alarmId: alarmId,
       occurrenceId: occurrenceId,
-      challenge: alarm["task"] as? String ?? "Math",
-      sound: alarm["sound"] as? String ?? "Air raid",
+      challenge: alarm["task"] as? String ?? "Shake Your Phone",
+      sound: alarm["sound"] as? String ?? "police_siren",
       scheduledAt: now.timeIntervalSince1970 * 1000,
       timeZone: pendingRing?["timeZone"] as? String ?? TimeZone.current.identifier
     )
     let alert = AlarmPresentation.Alert(
       title: LocalizedStringResource("WAYYKUP · ALARM CONTINUES"),
-      stopButton: AlarmButton(text: LocalizedStringResource("Stop"), textColor: .white, systemImageName: "stop.fill"),
+      stopButton: AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "stop.fill"),
       secondaryButton: AlarmButton(text: LocalizedStringResource("Prove it"), textColor: .white, systemImageName: "arrow.up.forward.app"),
       secondaryButtonBehavior: .custom
     )
@@ -605,9 +844,7 @@ private enum NativeAlarmScheduler {
         scheduledAt: metadata.scheduledAt,
         timeZone: metadata.timeZone
       ),
-      sound: AlertConfiguration.AlertSound.named(
-        alarm["customSoundName"] as? String ?? soundResource(for: metadata.sound)
-      )
+      sound: AlertConfiguration.AlertSound.named(soundResource(for: metadata.sound))
     )
     try await AlarmManager.shared.schedule(id: id, configuration: configuration)
     ids.append(id.uuidString)
@@ -621,9 +858,14 @@ private enum NativeAlarmScheduler {
     challenge: String,
     sound: String,
     scheduledAt: Double,
-    timeZone: String
+    timeZone: String,
+    isRearm: Bool
   ) {
     let at = Date().timeIntervalSince1970 * 1000
+    let previous = pendingRing
+    let sameOccurrence = previous?["alarmId"] as? String == alarmId
+      && previous?["occurrenceId"] as? String == occurrenceId
+    let state = sameOccurrence && !isRearm ? previous?["state"] as? String ?? "ringing" : "ringing"
     let ring: [String: Any] = [
       "alarmId": alarmId,
       "occurrenceId": occurrenceId,
@@ -632,7 +874,8 @@ private enum NativeAlarmScheduler {
       "timeZone": timeZone,
       "challenge": challenge,
       "sound": sound,
-      "testAlarm": alarmId == testAlarmId
+      "testAlarm": alarmId == testAlarmId,
+      "state": state
     ]
     prefs.set(ring, forKey: pendingKey)
     NSLog(
@@ -654,30 +897,23 @@ private enum NativeAlarmScheduler {
     )
   }
 
-  private static func soundResource(for sound: String) -> String {
-    let key = sound.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: "_", options: .regularExpression)
-      .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-    let names = [
-      "dread_siren": "dread-siren.wav",
-      "panic_engine": "panic-engine.wav",
-      "nightmare": "nightmare.wav",
-      "final_warning": "final-warning.wav",
-      "air_raid": "alarm-tone.wav",
-      "beacon": "beacon.wav",
-      "buzz_saw": "buzz-saw.wav",
-      "kitchen_phone": "kitchen-phone.wav",
-      "pulse": "pulse.wav",
-      "honk": "honk.wav",
-      "inferno": "inferno.wav",
-      "redline": "redline.wav",
-      "bugle_call": "bugle-call.wav",
-      "countdown": "countdown.wav",
-      "jackhammer": "jackhammer.wav",
-      "warpath": "warpath.wav"
-    ]
-    return names[key] ?? "alarm-tone.wav"
-  }
   #endif
+}
+
+private func soundResource(for sound: String) -> String {
+  let names: Set<String> = [
+    "police_siren",
+    "air_raid",
+    "fire_alarm",
+    "industrial_klaxon",
+    "accelerating_beeps",
+    "metal_clang",
+    "bass_earthquake",
+    "screech",
+    "emergency_two_tone",
+    "chaos_final_boss"
+  ]
+  return "\(names.contains(sound) ? sound : "police_siren").caf"
 }
 
 private enum NativeAlarmError: LocalizedError {
@@ -724,7 +960,8 @@ private struct RearmAlarmIntent: LiveActivityIntent {
       challenge: challenge,
       sound: sound,
       scheduledAt: scheduledAt,
-      timeZone: timeZone
+      timeZone: timeZone,
+      isRearm: true
     )
     try await NativeAlarmScheduler.rearm(alarmId: alarmId)
     return .result()
@@ -761,7 +998,8 @@ private struct OpenChallengeIntent: LiveActivityIntent {
       challenge: challenge,
       sound: sound,
       scheduledAt: scheduledAt,
-      timeZone: timeZone
+      timeZone: timeZone,
+      isRearm: false
     )
     return .result()
   }
@@ -836,8 +1074,8 @@ private enum NativeOccurrenceStore {
         challenge TEXT NOT NULL, difficulty INTEGER NOT NULL DEFAULT 1,
         tierReached TEXT NOT NULL DEFAULT 'gentle' CHECK (tierReached IN ('gentle','standard','brutal')),
         failedAttempts INTEGER NOT NULL DEFAULT 0, rearms INTEGER NOT NULL DEFAULT 0, soundId TEXT NOT NULL,
-        morningRating INTEGER CHECK (morningRating BETWEEN 1 AND 5), shakesCounted INTEGER, steps INTEGER,
-        mathCorrect INTEGER, mathAttempts INTEGER, challengeDurationMs INTEGER, UNIQUE (alarmId, localDate)
+        morningRating INTEGER CHECK (morningRating BETWEEN 1 AND 5), shakesCounted INTEGER,
+        challengeDurationMs INTEGER, UNIQUE (alarmId, localDate)
       );
       CREATE INDEX IF NOT EXISTS occurrences_localDate_idx ON occurrences(localDate);
       """, nil, nil, nil)
@@ -860,15 +1098,11 @@ private enum NativeOccurrenceStore {
 
   private static func normalizedChallenge(_ task: String) -> String {
     switch task {
-    case "Math": "math"
-    case "Shake": "shake"
-    case "QR scan": "qr"
-    case "Memory": "memory"
+    case "Yell to Stop": "yell_to_stop"
+    case "Push-up Challenge": "push_up"
+    case "Shake Your Phone": "shake_phone"
     case "Object Hunt": "object_hunt"
-    case "Toothbrush": "toothbrush"
-    case "Yell to Wake": "yell"
-    case "Face Challenge": "face"
-    default: "exercise"
+    default: "legacy"
     }
   }
 

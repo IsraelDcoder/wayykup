@@ -1,16 +1,13 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
+import type { AlarmSoundId } from '../../src/alarmSoundIds';
 
 export type AlarmSchedule = {
   id: string;
   time: string;
   days: string[];
   enabled: boolean;
-  task: string;
-  sound: string;
-  customSoundUri?: string;
-  customSoundName?: string;
-  mathDifficulty?: string;
-  shakeCount?: number;
+  task: 'Yell to Stop' | 'Push-up Challenge' | 'Shake Your Phone' | 'Object Hunt';
+  sound: AlarmSoundId;
 };
 
 export type AlarmHealth = {
@@ -36,6 +33,7 @@ export type RingStartedEvent = {
   challenge: string;
   sound: string;
   testAlarm?: boolean;
+  state?: 'ringing' | 'challenge_pending' | 'challenge_active';
 };
 
 export type ObjectPrediction = {
@@ -43,31 +41,55 @@ export type ObjectPrediction = {
   confidence: number;
 };
 
-export type MicrophoneLevelEvent = {
-  dbfs: number;
+export type PoseLandmark = {
+  x: number;
+  y: number;
+  confidence: number;
 };
 
-export type MicrophoneErrorEvent = {
+export type PushUpPose = Partial<Record<
+  'leftShoulder' | 'leftElbow' | 'leftWrist' | 'leftHip' | 'leftAnkle'
+  | 'rightShoulder' | 'rightElbow' | 'rightWrist' | 'rightHip' | 'rightAnkle',
+  PoseLandmark
+>>;
+
+export type SpeechResultEvent = {
+  recognized: boolean;
+  text: string;
+  confidence: number;
+};
+
+export type SpeechErrorEvent = {
   reason: string;
 };
 
+type AlarmEventMap = {
+  ringStarted: RingStartedEvent;
+  challengeCompleted: RingStartedEvent;
+  healthChanged: AlarmHealth;
+  speechResult: SpeechResultEvent;
+  speechError: SpeechErrorEvent;
+};
+
 type NativeAlarmModule = {
-  classifyImage(uri: string): Promise<ObjectPrediction[]>;
-  importSound(uri: string, name: string): Promise<{ uri: string; name: string; displayName: string }>;
+  classifyImage(uri: string, target: string): Promise<ObjectPrediction[]>;
+  detectPushUpPose(uri: string): Promise<PushUpPose>;
   schedule(alarm: AlarmSchedule): Promise<void>;
   cancel(alarmId: string): Promise<void>;
   rearm(alarmId: string, delaySeconds: number): Promise<void>;
-  cancelChain(alarmId: string, status: 'completed' | 'bypassed' | 'abandoned'): Promise<void>;
+  activateChallenge(alarmId: string, occurrenceId: string): Promise<void>;
+  cancelChain(alarmId: string, status: 'completed', occurrenceId: string): Promise<void>;
   getHealth(): Promise<AlarmHealth>;
   requestPermissions(): Promise<AlarmHealth>;
   openSettings(kind: 'exactAlarm' | 'fullScreenIntent' | 'battery' | 'app'): Promise<void>;
   startTestAlarm(): Promise<void>;
-  startMicrophoneMeter(): Promise<void>;
-  stopMicrophoneMeter(): Promise<void>;
+  startSpeechRecognition(phrase: string): Promise<void>;
+  stopSpeechRecognition(): Promise<void>;
   setAlarmAudioDucked(ducked: boolean, fadeDurationMs: number): Promise<void>;
-  addListener(
-    eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged' | 'microphoneLevel' | 'microphoneError',
-    listener: (event: RingStartedEvent | AlarmHealth | MicrophoneLevelEvent | MicrophoneErrorEvent) => void,
+  setAlarmVolumeTier(tier: number): Promise<void>;
+  addListener<K extends keyof AlarmEventMap>(
+    eventName: K,
+    listener: (event: AlarmEventMap[K]) => void,
   ): { remove(): void };
   getPendingChallenge(): Promise<RingStartedEvent | null>;
   consumePendingChallenge(): Promise<void>;
@@ -77,7 +99,8 @@ const nativeModule = requireOptionalNativeModule<NativeAlarmModule>('WayykupAlar
 
 export const isNativeAlarmAvailable = nativeModule !== null;
 
-export const classifyImage = (uri: string) => requireModule().classifyImage(uri);
+export const classifyImage = (uri: string, target: string) => requireModule().classifyImage(uri, target);
+export const detectPushUpPose = (uri: string) => requireModule().detectPushUpPose(uri);
 
 function requireModule(): NativeAlarmModule {
   if (!nativeModule) {
@@ -87,12 +110,13 @@ function requireModule(): NativeAlarmModule {
 }
 
 export const schedule = (alarm: AlarmSchedule) => requireModule().schedule(alarm);
-export const importSound = (uri: string, name: string) => requireModule().importSound(uri, name);
 export const cancel = (alarmId: string) => requireModule().cancel(alarmId);
 export const rearm = (alarmId: string, delayMs = 75_000) =>
   requireModule().rearm(alarmId, delayMs / 1000);
-export const cancelChain = (alarmId: string, status: 'completed' | 'bypassed' | 'abandoned' = 'completed') =>
-  requireModule().cancelChain(alarmId, status);
+export const activateChallenge = (alarmId: string, occurrenceId: string) =>
+  requireModule().activateChallenge(alarmId, occurrenceId);
+export const cancelChain = (alarmId: string, occurrenceId: string) =>
+  requireModule().cancelChain(alarmId, 'completed', occurrenceId);
 export const getHealth = () => requireModule().getHealth();
 export const requestPermissions = () => requireModule().requestPermissions();
 export const openSettings = (kind: 'exactAlarm' | 'fullScreenIntent' | 'battery' | 'app') =>
@@ -100,14 +124,16 @@ export const openSettings = (kind: 'exactAlarm' | 'fullScreenIntent' | 'battery'
 export const getPendingChallenge = () => requireModule().getPendingChallenge();
 export const consumePendingChallenge = () => requireModule().consumePendingChallenge();
 export const startTestAlarm = () => requireModule().startTestAlarm();
-export const startMicrophoneMeter = () => requireModule().startMicrophoneMeter();
-export const stopMicrophoneMeter = () => nativeModule?.stopMicrophoneMeter() ?? Promise.resolve();
+export const startSpeechRecognition = (phrase: string) => requireModule().startSpeechRecognition(phrase);
+export const stopSpeechRecognition = () => nativeModule?.stopSpeechRecognition() ?? Promise.resolve();
 export const setAlarmAudioDucked = (ducked: boolean, fadeDurationMs: number) =>
   nativeModule?.setAlarmAudioDucked(ducked, fadeDurationMs) ?? Promise.resolve();
+export const setAlarmVolumeTier = (tier: number) =>
+  nativeModule?.setAlarmVolumeTier(tier) ?? Promise.resolve();
 
-export function addAlarmListener(
-  eventName: 'ringStarted' | 'challengeCompleted' | 'healthChanged' | 'microphoneLevel' | 'microphoneError',
-  listener: (event: RingStartedEvent | AlarmHealth | MicrophoneLevelEvent | MicrophoneErrorEvent) => void,
+export function addAlarmListener<K extends keyof AlarmEventMap>(
+  eventName: K,
+  listener: (event: AlarmEventMap[K]) => void,
 ) {
   if (!nativeModule) return { remove() {} };
   return nativeModule.addListener(eventName, listener);

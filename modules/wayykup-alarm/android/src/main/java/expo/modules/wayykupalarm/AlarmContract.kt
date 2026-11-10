@@ -14,6 +14,7 @@ internal object AlarmContract {
   const val EXTRA_OCCURRENCE_ID = "occurrenceId"
   const val EXTRA_SCHEDULED_AT = "scheduledAt"
   const val EXTRA_TIME_ZONE = "timeZone"
+  const val EXTRA_IS_REARM = "isRearm"
   const val EXTRA_CHAIN_STARTED_AT = "chainStartedAt"
   const val EXTRA_REARM_COUNT = "rearmCount"
   const val EXTRA_DELAY_MS = "delayMs"

@@ -150,37 +150,36 @@
       <section>
         <h2>1. Information Wayykup uses</h2>
         <ul>
-          <li><strong>Alarm and challenge settings:</strong> alarm times, repeat days, sounds, challenge types and settings, selected Object Hunt targets, and (if you use that challenge) the contents of a linked QR code.</li>
+          <li><strong>Alarm and challenge settings:</strong> alarm times, repeat days, sounds, challenge types and settings, and selected Object Hunt targets.</li>
           <li><strong>Wake-up history:</strong> alarm schedule and time-zone information, ring and completion times, challenge type, attempts, snoozes or bypasses, challenge results, and optional morning ratings. Some of this information is recorded in a local database on your device.</li>
           <li><strong>Onboarding responses:</strong> answers you choose to provide, which may include age range or age, gender, wake and bedtime habits, reasons for waking, alarm habits, and how you heard about Wayykup. An unfinished onboarding draft is saved locally so you can resume it.</li>
-          <li><strong>Device permissions and capabilities:</strong> camera access for Object Hunt, QR, or Face challenges; microphone access for Yell to Wake; notifications and alarm permissions; motion sensor readings for movement challenges; and audio access for alarm playback or sounds you select.</li>
+          <li><strong>Device permissions and capabilities:</strong> camera access for Object Hunt and Push-up Challenge; microphone and speech-recognition access for Yell to Stop; notifications and alarm permissions; motion sensor readings for Shake Your Phone; and audio access for alarm playback or sounds you select.</li>
           <li><strong>Device and app information:</strong> the app may use the device model, operating system, app version, and technical diagnostic information needed to check alarm compatibility or operate third-party SDKs.</li>
           <li><strong>Subscription information:</strong> if subscriptions are enabled, RevenueCat and Apple or Google process purchase and subscription status, product and entitlement information, and related transaction or diagnostic data. Wayykup does not receive or store your full payment-card details.</li>
         </ul>
       </section>
 
       <section>
-        <h2>2. Camera, photos, and QR challenges</h2>
-        <p>Camera access is optional and is used only when you choose a camera-based challenge. For Object Hunt, the app takes a photo when you request recognition and analyzes its image labels on-device. Wayykup does not send that photo to a Wayykup server for recognition. For a QR challenge, the camera reads the code and its contents are saved with the alarm on your device so the app can compare a later scan.</p>
-        <p>For Face Challenge, the front camera provides temporary frames to an on-device face-gesture detector while the challenge is active. The app checks gestures such as smiling, blinking, and turning your head. Frames and face measurements are processed in memory, are not saved or uploaded, and are not used for face recognition, identification, or identity templates. The camera session is released when the challenge ends or switches to its fallback.</p>
-        <p>You can deny or revoke camera permission in your device settings. Camera-based challenges will not work without permission. Any temporary camera image handling or caching may also be subject to your operating system and device behavior.</p>
+        <h2>2. Camera, photos, and pose detection</h2>
+        <p>Camera access is optional and is used only when you choose Object Hunt or Push-up Challenge. For Object Hunt, the app takes a photo when you request recognition and analyzes its image labels on-device. For Push-up Challenge, temporary camera images are analyzed on-device to locate body joints and verify repetitions. Wayykup does not upload those images or use pose detection to identify a person. Temporary images are removed after native processing where supported by the device.</p>
+        <p>You can deny or revoke camera permission in your device settings. Camera-based challenges will not work without permission. Any temporary image handling or caching may also be subject to your operating system and device behavior.</p>
       </section>
 
       <section>
-        <h2>3. Microphone and Yell to Wake</h2>
-        <p>If you select Yell to Wake, Wayykup requests microphone access during setup and checks it again when the challenge starts. The app reads short-lived microphone samples in memory to calculate a sound-level meter; it does not create an audio recording or save, upload, or log raw audio. Only the challenge result and non-identifying challenge metrics may be included in optional analytics. Revoking permission or losing microphone access switches the alarm to its selected fallback challenge.</p>
-        <p>Microphone access is not used in the background. Yell to Wake uses it only while its challenge screen is active. Disconnecting Bluetooth or wired headsets may improve microphone routing on some devices.</p>
+        <h2>3. Microphone and Yell to Stop</h2>
+        <p>If you select Yell to Stop, Wayykup requests microphone and speech-recognition access when the challenge starts. On-device speech recognition checks the selected phrase; Wayykup does not save or upload raw audio or transcripts. Only challenge result metadata may be included in optional analytics. If permission or speech recognition is unavailable, the alarm remains active and the challenge can be retried.</p>
+        <p>Microphone access is used only while Yell to Stop is active in the foreground. Disconnecting Bluetooth or wired headsets may improve microphone routing on some devices.</p>
       </section>
 
       <section>
         <h2>4. Where information is stored</h2>
-        <p>Alarm settings, onboarding drafts, app preferences, linked challenge data, and wake-up history are stored in app-private storage on your device. Custom alarm sounds you select are copied into app-private storage for playback. This information is not backed up to a Wayykup account because the app does not currently provide account-based cloud sync.</p>
+        <p>Alarm settings, onboarding drafts, app preferences, linked challenge data, and wake-up history are stored in app-private storage on your device. This information is not backed up to a Wayykup account because the app does not currently provide account-based cloud sync.</p>
         <p>Uninstalling the app or clearing its storage will generally remove locally stored app data, subject to your device’s backup and operating-system behavior. You can also remove or change individual alarms and preferences inside the app.</p>
       </section>
 
       <section>
         <h2>5. Analytics</h2>
-        <p>If a Mixpanel analytics token is configured for your build, Wayykup sends selected product-usage events to Mixpanel. Events can include alarm creation or changes, challenge type and alarm time, ring and completion timestamps, ring latency, device model, snooze count, subscription plan type, and successful object recognition. Yell and Face Challenge events may include challenge type, mode, duration, attempt count, fallback or permission outcome, and the requested Face gesture sequence. They do not include raw audio, video, camera frames, face measurements, or identity templates. These events help us understand app reliability and feature use. The app does not intentionally send your camera image, QR contents, onboarding answers, or payment-card details in these analytics events.</p>
+        <p>If a Mixpanel analytics token is configured for your build, Wayykup sends selected product-usage events to Mixpanel. Events can include alarm creation or changes, challenge type and alarm time, ring and completion timestamps, ring latency, device model, snooze count, subscription plan type, and successful object recognition. Challenge events may include the challenge type, selected phrase, completion duration, target, attempts, or permission outcome. They do not include raw audio, images, or pose landmarks. These events help us understand app reliability and feature use. The app does not intentionally send your images, onboarding answers, or payment-card details in these analytics events.</p>
         <p>Analytics are not initialized in builds without a configured Mixpanel token, and the app’s web preview does not initialize Mixpanel. Mixpanel processes data under its own privacy and retention practices. See <a href="https://mixpanel.com/legal/privacy-policy/">Mixpanel’s Privacy Policy</a>.</p>
       </section>
 

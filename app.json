@@ -11,9 +11,10 @@
       "bundleIdentifier": "com.wayykup.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSMicrophoneUsageDescription": "Wayykup listens only for sound levels during Yell to Wake. Audio is processed in memory on your device and never saved or uploaded."
+        "NSMicrophoneUsageDescription": "Wayykup listens while you say your selected wake-up phrase. Audio is processed in memory on your device and never saved or uploaded.",
+        "NSSpeechRecognitionUsageDescription": "Wayykup uses on-device speech recognition to verify your selected wake-up phrase."
       },
-      "buildNumber": "4"
+      "buildNumber": "16"
     },
     "android": {
       "package": "com.wayykup.app",
@@ -28,7 +29,8 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ],
       "blockedPermissions": [
         "android.permission.ACTIVITY_RECOGNITION"
@@ -38,7 +40,7 @@
         "foregroundImage": "./assets/icon.png"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 4
+      "versionCode": 6
     },
     "web": {
       "favicon": "./assets/icon.png"
@@ -49,13 +51,13 @@
         {
           "enableBackgroundPlayback": true,
           "recordAudioAndroid": true,
-          "microphonePermission": "Wayykup measures microphone levels during Yell to Wake. It does not record, save, or upload audio."
+          "microphonePermission": "Wayykup listens while you say your selected wake-up phrase. Audio is processed on-device and is not saved or uploaded."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Wayykup uses the camera for object, QR, and Face wake-up challenges. Face gestures are detected on-device; frames are never saved or uploaded.",
+          "cameraPermission": "Wayykup uses the camera to recognize your selected object or verify push-up form. Images are processed on-device and are not uploaded.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }

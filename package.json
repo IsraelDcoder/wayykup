@@ -9,11 +9,9 @@
     "expo": "~58.0.23",
     "expo-audio": "~58.0.11",
     "expo-background-task": "~58.0.12",
-    "expo-brightness": "~58.0.2",
     "expo-build-properties": "~58.0.12",
     "expo-camera": "~58.0.14",
     "expo-dev-client": "~58.0.18",
-    "expo-document-picker": "~58.0.4",
     "expo-font": "~58.0.11",
     "expo-haptics": "~58.0.7",
     "expo-notifications": "~58.1.8",
@@ -35,8 +33,6 @@
     "react-native-safe-area-context": "~5.11.1",
     "react-native-svg": "15.16.0",
     "react-native-view-shot": "6.1.1",
-    "react-native-vision-camera": "^5.2.4",
-    "react-native-vision-camera-face-detector": "^2.1.0",
     "react-native-web": "^0.21.4",
     "react-native-worklets": "0.13.0"
   },
@@ -57,7 +53,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
     "test:stats": "tsx --test src/stats/logic.test.ts",
-    "test:challenges": "tsx --test src/challenges/objects.test.ts src/challenges/yellMachine.test.ts src/challenges/faceMachine.test.ts"
+    "test:challenges": "tsx --test src/challenges/objects.test.ts src/challenges/registry.test.ts src/challenges/pushUpMachine.test.ts",
+    "test:alarms": "tsx --test src/alarmValidation.test.ts src/alarmLifecycle.test.ts src/alarmSoundIds.test.ts"
   },
   "private": true
 }

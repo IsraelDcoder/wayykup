@@ -3,6 +3,9 @@ import * as Notifications from 'expo-notifications';
 import { Mixpanel } from 'mixpanel-react-native';
 import { Platform } from 'react-native';
 import { materializeOccurrences } from './stats/repository';
+import { isAlarmRecord, migrateStoredAlarm, type AlarmRecord } from './alarmValidation';
+import type { ChallengeTask } from './challenges/registry';
+export type { AlarmRecord } from './alarmValidation';
 import {
   getHealth as getNativeAlarmHealth,
   isNativeAlarmAvailable,
@@ -12,25 +15,6 @@ import {
   cancel as cancelNativeAlarm,
   type AlarmHealth,
 } from '../modules/wayykup-alarm';
-
-export type AlarmRecord = {
-  id: string;
-  time: string;
-  task: 'Math' | 'Shake' | 'QR scan' | 'Memory' | 'Object Hunt' | 'Toothbrush' | 'Push-ups' | 'Squats' | 'Yell to Wake' | 'Face Challenge';
-  days: string[];
-  sound: string;
-  customSoundUri?: string;
-  customSoundName?: string;
-  enabled: boolean;
-  savage: boolean;
-  qrCode?: string;
-  huntItems?: string[];
-  huntTarget?: string;
-  mathDifficulty: 'Easy' | 'Medium' | 'Hard';
-  shakeCount?: number;
-  yellMode?: 'loud' | 'whisper';
-  fallbackTask?: 'Math' | 'Memory';
-};
 
 const ALARMS_STORAGE_KEY = 'savage-alarm:alarms:v1';
 const KEEP_ALARM_PLAYING_STORAGE_KEY = 'wayykup:keep-alarm-playing:v1';
@@ -44,35 +28,26 @@ export type AppProgress = {
 
 let mixpanel: Mixpanel | null = null;
 
-function isAlarmRecord(value: unknown): value is AlarmRecord {
-  if (typeof value !== 'object' || value === null) return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.id === 'string'
-    && typeof record.time === 'string'
-    && ['Math', 'Shake', 'QR scan', 'Memory', 'Object Hunt', 'Toothbrush', 'Push-ups', 'Squats'].includes(String(record.task))
-    && Array.isArray(record.days)
-    && record.days.every((day) => typeof day === 'string')
-    && typeof record.sound === 'string'
-    && (record.customSoundUri === undefined || typeof record.customSoundUri === 'string')
-    && (record.customSoundName === undefined || typeof record.customSoundName === 'string')
-    && typeof record.enabled === 'boolean'
-    && typeof record.savage === 'boolean'
-    && ['Easy', 'Medium', 'Hard'].includes(String(record.mathDifficulty))
-    && (record.shakeCount === undefined || (typeof record.shakeCount === 'number' && [50, 100, 200].includes(record.shakeCount)))
-    && (record.qrCode === undefined || typeof record.qrCode === 'string')
-    && (record.huntItems === undefined || (Array.isArray(record.huntItems) && record.huntItems.every((item) => typeof item === 'string')))
-    && (record.huntTarget === undefined || typeof record.huntTarget === 'string');
-}
-
 export async function loadAlarms(): Promise<AlarmRecord[] | null> {
   const savedAlarms = await AsyncStorage.getItem(ALARMS_STORAGE_KEY);
   if (!savedAlarms) return null;
 
   const parsed: unknown = JSON.parse(savedAlarms);
-  if (!Array.isArray(parsed) || !parsed.every(isAlarmRecord)) {
+  if (!Array.isArray(parsed)) {
     throw new Error('Saved alarm data is invalid.');
   }
-  return parsed;
+  const alarms: AlarmRecord[] = [];
+  for (const savedAlarm of parsed) {
+    const alarm = migrateStoredAlarm(savedAlarm);
+    if (!alarm) throw new Error('Saved alarm data is invalid.');
+    alarms.push(alarm);
+  }
+  const normalized = JSON.stringify(alarms);
+  if (normalized !== savedAlarms) {
+    await AsyncStorage.setItem(ALARMS_STORAGE_KEY, normalized);
+  }
+  if (!alarms.every(isAlarmRecord)) throw new Error('Saved alarm migration did not produce valid alarm data.');
+  return alarms;
 }
 
 export async function persistAlarms(alarms: AlarmRecord[]): Promise<void> {
@@ -125,7 +100,10 @@ export async function requestAlarmNotifications(): Promise<boolean> {
 export async function syncAlarmNotifications(alarms: AlarmRecord[]): Promise<void> {
   if (Platform.OS === 'web') return;
 
-  await materializeOccurrences(alarms);
+  const schedulable = alarms.filter((alarm): alarm is AlarmRecord & { task: ChallengeTask } =>
+    alarm.enabled && alarm.task !== null && alarm.challengeConfig !== undefined,
+  );
+  await materializeOccurrences(schedulable);
   if (!isNativeAlarmAvailable) {
     throw new Error('Native alarms are unavailable in Expo Go. Install a Wayykup development build.');
   }
@@ -138,15 +116,15 @@ export async function syncAlarmNotifications(alarms: AlarmRecord[]): Promise<voi
   if (!Array.isArray(previousIds) || !previousIds.every((id) => typeof id === 'string')) {
     throw new Error('Saved native alarm identifiers are invalid.');
   }
-  const enabled = alarms.filter((alarm) => alarm.enabled);
-  const currentIds = enabled.map((alarm) => alarm.id);
+  const currentIds = schedulable.map((alarm) => alarm.id);
   for (const oldId of previousIds) {
     if (!currentIds.includes(oldId)) await cancelNativeAlarm(oldId);
   }
+  for (const alarm of schedulable) {
+    await scheduleNativeAlarm(alarm);
+  }
   for (const alarm of alarms) {
-    if (alarm.enabled) {
-      await scheduleNativeAlarm(alarm);
-    } else {
+    if (!alarm.enabled || alarm.task === null || !alarm.challengeConfig) {
       await cancelNativeAlarm(alarm.id);
     }
   }
