@@ -11,10 +11,11 @@
       "bundleIdentifier": "com.wayykup.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "NSPhotoLibraryUsageDescription": "Wayykup uses photo access to recognize the target object in your Object Hunt wake-up challenge. Images are processed on-device and are not uploaded.",
         "NSMicrophoneUsageDescription": "Wayykup listens while you say your selected wake-up phrase. Audio is processed in memory on your device and never saved or uploaded.",
         "NSSpeechRecognitionUsageDescription": "Wayykup uses on-device speech recognition to verify your selected wake-up phrase."
       },
-      "buildNumber": "16"
+      "buildNumber": "18"
     },
     "android": {
       "package": "com.wayykup.app",
@@ -40,7 +41,7 @@
         "foregroundImage": "./assets/icon.png"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 6
+      "versionCode": 7
     },
     "web": {
       "favicon": "./assets/icon.png"
